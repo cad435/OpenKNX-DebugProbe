@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenKNX DebugProbe</title>
+<style>
+:root{--bg:#f7f7f8;--fg:#1b1b1f;--mut:#6b6b76;--card:#fff;--line:#e2e2e8;--acc:#1f6feb;--ok:#1a7f4b;--warn:#8a6100;--err:#b3261e}
+@media(prefers-color-scheme:dark){:root{--bg:#141417;--fg:#eceef2;--mut:#9a9aa6;--card:#1d1d22;--line:#2c2c34;--acc:#4f8ef7;--ok:#3fbf7f;--warn:#e0a800;--err:#ff6b5e}}
+*{box-sizing:border-box}
+body{margin:0;padding:1.5rem;background:var(--bg);color:var(--fg);
+     font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+/* 46rem waren auf einem breiten Monitor rund ein Drittel der Fläche. Jetzt
+   nimmt die Seite die Breite mit und ordnet die kleinen Infokarten ab 72rem
+   zweispaltig an; alles mit langem Inhalt (Konsole, Snippet, Ziel) bleibt
+   ueber die ganze Breite. */
+main{max-width:min(100rem,100%);margin:0 auto}
+@media(min-width:72rem){
+  main{display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start}
+  main>h1,main>.sub,main>section.wide{grid-column:1/-1}
+  main>section{margin-bottom:0}
+  main>.sub{margin-bottom:.5rem}
+}
+h1{font-size:1.25rem;margin:0 0 .25rem}
+.sub{color:var(--mut);margin:0 0 1.5rem;font-size:.875rem}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:1rem 1.25rem;margin-bottom:1rem}
+h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 .75rem}
+dl{display:grid;grid-template-columns:auto 1fr;gap:.4rem 1rem;margin:0}
+dt{color:var(--mut);white-space:nowrap}
+dd{margin:0;overflow-wrap:anywhere}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}
+.pill{display:inline-block;padding:.1rem .5rem;border-radius:99px;font-size:.8rem;background:var(--line)}
+.pill.ok{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
+.pill.warn{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
+.pill.err{background:color-mix(in srgb,var(--err) 20%,transparent);color:var(--err)}
+.target-head{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;margin-bottom:.75rem}
+.target-name{font-size:1.05rem;font-weight:600}
+.waiting{display:flex;align-items:center;gap:.6rem;color:var(--mut)}
+.dot{width:.55rem;height:.55rem;border-radius:50%;background:var(--mut);
+     animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+button{font:inherit;padding:.5rem .9rem;border-radius:7px;border:1px solid var(--line);
+       background:var(--acc);color:#fff;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg)}
+button:disabled{opacity:.5;cursor:default}
+input[type=file]{font:inherit;max-width:100%}
+input[type=text],select{font:inherit;padding:.5rem .7rem;border-radius:7px;
+       border:1px solid var(--line);background:var(--card);color:var(--fg)}
+input#cmd{flex:1 1 18rem;min-width:0;
+       font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}
+input#cmd:disabled{opacity:.5}
+.note.err{color:var(--err)}
+progress{width:100%;height:.5rem;margin-top:.75rem}
+.msg{margin-top:.75rem;font-size:.875rem}
+.msg.ok{color:var(--ok)}
+.msg.err{color:var(--err)}
+.row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.note{font-size:.8rem;color:var(--mut);margin:.75rem 0 0}
+.snip{margin-bottom:.8rem}
+.sniplabel{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);font-weight:600}
+button.small{padding:.25rem .6rem;font-size:.8rem}
+textarea[readonly]{width:100%;margin-top:.35rem;padding:.55rem .7rem;border-radius:7px;
+        background:#0f1116;color:#d7dbe3;border:1px solid var(--line);resize:vertical;
+        font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
+        line-height:1.5;white-space:pre;overflow-x:auto}
+pre#con{margin:0;padding:.7rem .8rem;height:min(58vh,32rem);overflow:auto;border-radius:8px;
+        background:#0f1116;color:#d7dbe3;border:1px solid var(--line);
+        font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
+        line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<main>
+  <h1 id="name">OpenKNX DebugProbe</h1>
+  <p class="sub" id="sub">verbinde…</p>
+
+  <section class="wide">
+    <h2>Zielgerät am USB-C</h2>
+    <div id="target"></div>
+  </section>
+
+  <section id="snipsec" class="wide" hidden>
+    <h2>Für die platformio.ini des Zielprojekts</h2>
+    <p class="note" id="snipfor" style="margin:0 0 .7rem"></p>
+
+    <div class="snip">
+      <div class="row" style="justify-content:space-between">
+        <span class="sniplabel">Konsole</span>
+        <button class="ghost small" data-copy="snipmon">Kopieren</button>
+      </div>
+      <textarea id="snipmon" readonly rows="2" spellcheck="false"></textarea>
+    </div>
+
+    <div class="snip">
+      <div class="row" style="justify-content:space-between">
+        <span class="sniplabel">Upload</span>
+        <button class="ghost small" data-copy="snipup">Kopieren</button>
+      </div>
+      <textarea id="snipup" readonly rows="2" spellcheck="false"></textarea>
+    </div>
+
+    <p class="note">
+      Als reinen Text zum Abholen — etwa für ein Skript oder einen KI-Agenten:
+      <code class="mono">curl http://<span id="sniphost">…</span>/api/snippet</code>
+    </p>
+  </section>
+
+  <section class="wide">
+    <h2>Konsole mitlesen</h2>
+    <div class="row" style="margin-bottom:.6rem">
+      <label style="display:flex;align-items:center;gap:.4rem;font-size:.85rem">
+        <input type="checkbox" id="follow" checked> automatisch nach unten scrollen
+      </label>
+      <button class="ghost" id="clear">Ansicht leeren</button>
+      <span class="pill" id="constate">–</span>
+    </div>
+    <pre id="con"></pre>
+
+    <div class="row" style="margin-top:.6rem">
+      <input type="text" id="cmd" placeholder="Kommando ans Ziel — Enter sendet, ↑/↓ blättert"
+             autocomplete="off" autocapitalize="off" spellcheck="false" disabled>
+      <select id="eol" title="Zeilenende, das angehängt wird">
+        <option value="cr" selected>CR</option>
+        <option value="lf">LF</option>
+        <option value="crlf">CRLF</option>
+        <option value="none">ohne</option>
+      </select>
+      <button id="gosend" disabled>Senden</button>
+    </div>
+    <p class="note" id="cmdnote"></p>
+
+    <p class="note">
+      Zeigt denselben Mitschnitt wie <code class="mono">socket://…:2323</code>, inklusive
+      dem, was vor dem Öffnen dieser Seite auflief. Während einer Flash-Sitzung pausiert
+      er — das ist gewollt.
+    </p>
+  </section>
+
+  <section id="uf2sec" hidden>
+    <h2>Firmware des Zielgeräts (UF2)</h2>
+    <div class="row">
+      <input type="file" id="uf2" accept=".uf2">
+      <button id="goflash" disabled>Auf Zielgerät schreiben</button>
+    </div>
+    <progress id="fbar" value="0" max="100" hidden></progress>
+    <p class="msg" id="fmsg"></p>
+    <p class="note" id="fnote"></p>
+  </section>
+
+  <section>
+    <h2>Verbindungsdaten der Konsole</h2>
+    <dl>
+      <dt>TCP-Port</dt><dd id="cport">–</dd>
+      <dt>Client</dt><dd id="cclient">–</dd>
+      <dt>Vom Ziel</dt><dd id="crx">–</dd>
+      <dt>Zum Ziel</dt><dd id="ctx">–</dd>
+      <dt>Mitschnitt</dt><dd id="cbuf">–</dd>
+      <dt>RFC2217</dt><dd id="crfc">–</dd>
+    </dl>
+    <p class="note">
+      Monitor:
+      <code class="mono">socket://<span id="chost">…</span>:<span id="cport2">2323</span></code><br>
+      Mit Baudrate und DTR/RTS (esptool &amp; Co.):
+      <code class="mono">rfc2217://<span id="chost2">…</span>:<span id="cport3">4000</span></code>
+    </p>
+  </section>
+
+  <section>
+    <h2>Probe</h2>
+    <dl>
+      <dt>Firmware</dt><dd id="fw">–</dd>
+      <dt>Image</dt><dd id="slot">–</dd>
+      <dt>WLAN</dt><dd id="wifi">–</dd>
+      <dt>IP</dt><dd id="ip">–</dd>
+      <dt>Funk</dt><dd id="radio">–</dd>
+      <dt>Laufzeit</dt><dd id="up">–</dd>
+      <dt>Freier Heap</dt><dd id="heap">–</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Firmware der Probe aktualisieren</h2>
+    <div class="row">
+      <input type="file" id="file" accept=".bin">
+      <button id="go" disabled>Hochladen &amp; neu starten</button>
+    </div>
+    <progress id="bar" value="0" max="100" hidden></progress>
+    <p class="msg" id="msg"></p>
+    <p class="note">
+      Bei Problemen startet das vorherige Image automatisch wieder
+      (Rollback über die A/B-Partitionen).
+    </p>
+  </section>
+
+  <section>
+    <h2>WLAN</h2>
+    <button class="ghost" id="forget">Zugangsdaten löschen und Portal öffnen</button>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const KIND_LABEL = {
+  cdc:           ["CDC / COM-Port",       "ok"],
+  serial_bridge: ["USB-UART-Bridge",      "ok"],
+  bootsel:       ["BOOTSEL, flashbereit", "warn"],
+  msc:           ["Massenspeicher",       "ok"],
+  hid:           ["HID",                  ""],
+  hub:           ["USB-Hub",              ""],
+  unknown:       ["unbekannt",            "warn"]
+};
+
+function esc(s){
+  return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+function fmtDuration(s){
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
+        m=Math.floor(s%3600/60), sec=s%60;
+  return (d?d+"d ":"")+String(h).padStart(2,"0")+":"+String(m).padStart(2,"0")+":"+String(sec).padStart(2,"0");
+}
+
+function fmtBytes(n){
+  if(n < 1024) return n + " B";
+  if(n < 1024*1024) return (n/1024).toFixed(1) + " KB";
+  return (n/1024/1024).toFixed(2) + " MB";
+}
+
+function row(label, value){
+  if(!value) return "";
+  return "<dt>"+label+"</dt><dd>"+value+"</dd>";
+}
+
+/**
+ * Setzt den Inhalt eines Snippet-Feldes, ohne eine laufende Auswahl des
+ * Benutzers zu zerstoeren: der Status wird alle zwei Sekunden neu geholt, und
+ * ein Neuschreiben von .value hebt jede Markierung auf.
+ */
+function setSnippet(id, text){
+  const el = $(id);
+  if(el.value === text) return;
+  el.value = text;
+  el.rows = Math.max(2, text.split("\n").length);
+}
+
+/**
+ * Kopieren ohne navigator.clipboard: das braucht einen sicheren Kontext, die
+ * Probe liefert aber schlichtes HTTP im LAN. execCommand("copy") laeuft dort
+ * noch. Wenn beides scheitert, bleibt der Text immerhin markiert und Strg+C
+ * greift.
+ */
+document.addEventListener("click", function(ev){
+  const btn = ev.target.closest("button[data-copy]");
+  if(!btn) return;
+  const el = $(btn.dataset.copy);
+  el.focus();
+  el.setSelectionRange(0, el.value.length);
+  let ok = false;
+  try{ ok = document.execCommand("copy"); }catch(e){}
+  if(!ok && navigator.clipboard){
+    navigator.clipboard.writeText(el.value).then(function(){
+      btn.textContent = "kopiert";
+      setTimeout(function(){ btn.textContent = "Kopieren"; }, 1200);
+    }, function(){});
+    return;
+  }
+  btn.textContent = ok ? "kopiert" : "Strg+C";
+  setTimeout(function(){ btn.textContent = "Kopieren"; }, 1200);
+});
+
+function renderTarget(t){
+  const box = $("target");
+
+  if(!t || t.state === "not_started"){
+    box.innerHTML = '<div class="waiting"><span class="pill err">USB-Host nicht gestartet</span></div>';
+    return;
+  }
+  if(t.state !== "connected"){
+    box.innerHTML =
+      '<div class="waiting"><span class="dot"></span>' +
+      '<span>Kein Gerät angeschlossen — warte auf USB-C…</span></div>' +
+      (t.since_s > 2 ? '<p class="note">seit '+fmtDuration(t.since_s)+'</p>' : "");
+    return;
+  }
+
+  const label = KIND_LABEL[t.kind] || [t.kind, ""];
+  const noDriver = (t.driver === "unsupported" || t.driver === "none");
+
+  box.innerHTML =
+    '<div class="target-head">' +
+      '<span class="target-name">' + esc(t.description || "USB-Gerät") + '</span>' +
+      '<span class="pill ' + label[1] + '">' + esc(label[0]) + '</span>' +
+      (noDriver ? '<span class="pill warn">kein Host-Treiber</span>' : "") +
+    '</div>' +
+    '<dl>' +
+      row("Seriennummer", t.serial ? '<span class="mono">'+esc(t.serial)+'</span>'
+                                   : '<span style="color:var(--mut)">nicht gemeldet</span>') +
+      row("Hersteller",  esc(t.manufacturer || "")) +
+      row("Produkt",     esc(t.product || "")) +
+      row("VID:PID",     '<span class="mono">'+esc(t.vid)+":"+esc(t.pid)+'</span>') +
+      row("USB-Klasse",  '<span class="mono">'+esc(t["class"])+" / "+esc(t.interface_class)+'</span>') +
+      row("Treiber",     '<span class="mono">'+esc(t.driver)+'</span>') +
+      row("Geschwindigkeit", esc(t.speed || "")) +
+      row("Verbunden seit",  fmtDuration(t.since_s)) +
+    '</dl>';
+}
+
+async function poll(){
+  try{
+    const s = await (await fetch("/api/status",{cache:"no-store"})).json();
+    $("name").textContent = s.name || "OpenKNX DebugProbe";
+    $("sub").innerHTML = '<span class="pill ok">online</span>';
+    $("fw").textContent   = s.version + " (" + s.build + ")";
+    $("slot").textContent = s.partition + (s.pending_verify ? " — noch nicht bestätigt" : "");
+    $("wifi").textContent = s.ssid ? s.ssid + "  " + s.rssi + " dBm" : "–";
+    $("ip").textContent   = s.ip || "–";
+    // Der Funk dost, solange niemand auf 2323 oder 4000 haengt.
+    $("radio").textContent = s.radio_awake === undefined ? "–"
+      : (s.radio_awake ? "dauerhaft wach (Client aktiv)" : "Sparmodus");
+    $("up").textContent   = fmtDuration(s.uptime_s);
+    $("heap").textContent = (s.heap_free/1024).toFixed(0) + " KB";
+    renderTarget(s.target);
+
+    if(s.console){
+      $("cport").textContent   = s.console.port;
+      $("cport2").textContent  = s.console.port;
+      $("chost").textContent   = (s.name || "probe") + ".local";
+      $("chost2").textContent  = (s.name || "probe") + ".local";
+      $("cport3").textContent  = s.console.rfc2217_port;
+      $("cclient").textContent = s.console.client || "niemand verbunden";
+      $("crx").textContent     = fmtBytes(s.console.rx);
+      $("ctx").textContent     = fmtBytes(s.console.tx);
+      $("cbuf").textContent    = (s.console.buffer/1024).toFixed(0) + " KB";
+      $("crfc").textContent    = "Port " + s.console.rfc2217_port
+                               + (s.console.rfc2217_client ? " — Client verbunden" : " — frei");
+    }
+
+    // Der UF2-Bereich erscheint nur, wenn überhaupt ein RP2040 angesteckt ist.
+    // Bei einem ESP32 oder einer UART-Bridge wäre er sinnlos.
+    const rp2040 = !!(s.target && s.target.uf2_capable);
+    $("uf2sec").hidden = !rp2040;
+
+    // Die fertigen platformio.ini-Zeilen kommen aus der Firmware, damit
+    // /api/snippet und diese Ansicht nicht auseinanderlaufen koennen.
+    const sn = s.snippet || {};
+    const haveUp = !!sn.upload;
+    $("snipsec").hidden = !haveUp;
+    if(haveUp){
+      $("snipfor").textContent = "Ziel: " + (sn.comment || "");
+      $("sniphost").textContent = (s.name || "probe") + ".local";
+      setSnippet("snipmon", sn.monitor || "");
+      setSnippet("snipup",  sn.upload  || "");
+    }
+
+    // Nicht mehr am BOOTSEL-Zustand festmachen: die Probe schickt ein
+    // laufendes Ziel per 1200-Baud-Touch selbst dorthin. Es genuegt, dass
+    // ueberhaupt ein RP2040 hängt.
+    // Senden geht nur, wenn die serielle Sitzung wirklich offen ist.
+    const canSend = !!(s.target && s.target.serial_open);
+    $("cmd").disabled    = !canSend;
+    $("gosend").disabled = !canSend;
+    // Der Hinweis muss auch wieder verschwinden. Vorher wurde er nur gesetzt:
+    // stand beim ersten Poll noch keine serielle Sitzung, blieb "kein
+    // Zielgerät angesteckt" fuer immer stehen — auch wenn laengst eines hing.
+    // data-kind trennt die beiden Faelle: "block" gehoert dem Poll und wird
+    // von ihm aufgeraeumt, "result" ist die Rueckmeldung eines Sendevorgangs
+    // und darf stehen bleiben.
+    const note = $("cmdnote");
+    if(!canSend){
+      note.dataset.kind   = "block";
+      note.className      = "note";
+      // Ausdruecklich auf das Senden bezogen: direkt unter dem Mitschnitt
+      // klang "Kein Zielgerät angesteckt" so, als waere die Konsole kaputt.
+      note.textContent    = s.target && s.target.state === "connected"
+        ? "Senden nicht möglich: die serielle Sitzung zum Ziel ist nicht offen."
+        : "Senden nicht möglich: kein Zielgerät angesteckt. Der Mitschnitt oben bleibt lesbar.";
+    }else if(note.dataset.kind === "block"){
+      note.dataset.kind = "";
+      note.className    = "note";
+      note.textContent  = "";
+    }
+
+    const bootsel = s.target && s.target.kind === "bootsel";
+    $("goflash").disabled = !(rp2040 && $("uf2").files.length);
+    $("fnote").textContent = bootsel
+      ? "Ziel steht im BOOTSEL und ist flashbereit."
+      : "Ziel läuft. Beim Schreiben wird es per 1200-Baud-Touch selbst nach BOOTSEL "
+        + "geschickt — Taster drücken ist nur nötig, wenn seine Firmware den Touch "
+        + "nicht auswertet.";
+  }catch(e){
+    $("sub").innerHTML = '<span class="pill err">keine Verbindung</span>';
+  }
+}
+
+// --- Konsole ---------------------------------------------------------------
+let cursor = null;          // null = beim ersten Mal den ganzen Puffer holen
+let conBusy = false;
+
+const ESC = String.fromCharCode(27);
+const ANSI_ERASE = new RegExp(ESC + "\\[[0-9]*K", "g");   // Zeile löschen
+const ANSI_SEQ   = new RegExp(ESC + "\\[[0-9;?]*[A-Za-z]", "g");
+const ANSI_REST  = new RegExp(ESC + ".", "g");
+
+/**
+ * Kleine Zeilen-Zustandsmaschine für den Rohstrom der Zielkonsole.
+ *
+ * Warum nicht einfach jeden Abrufblock für sich umformen: die OpenKNX-Konsole
+ * schreibt nach jeder Logzeile ihren Prompt neu und radiert ihn beim nächsten
+ * Mal mit ESC[2K wieder weg. Der Strom endet also regelmäßig mit einem
+ * unfertigen "$ " ohne Zeilenumbruch — und die Löschanweisung dafür steckt erst
+ * im *nächsten* Abrufblock. Wer blockweise umformt, kann sie nicht mehr
+ * anwenden, weil der Prompt längst angezeigt ist; die Ausgabe klebt dann an der
+ * Prompt-Zeile und wirkt um ein Ereignis versetzt.
+ *
+ * Deshalb wird die unfertige Zeile über Blockgrenzen hinweg getrennt gehalten
+ * und wie in einem Terminal behandelt:
+ *   ESC[..K und CR  -> aktuelle Zeile verwerfen
+ *   LF              -> aktuelle Zeile abschließen
+ */
+let conLines = [];   // abgeschlossene Zeilen
+let conLine  = "";   // Inhalt der aktuellen Zeile
+let conCol   = 0;    // Schreibposition in der aktuellen Zeile
+
+// Platzhalter fuer "Zeile loeschen". Muss ein Zeichen sein, das im Nutztext
+// nicht vorkommt.
+const ERASE_MARK = String.fromCharCode(0);
+
+function feedConsole(raw){
+  const text = raw.replace(ANSI_ERASE, ERASE_MARK)
+                  .replace(ANSI_SEQ, "")
+                  .replace(ANSI_REST, "");
+
+  for(const ch of text){
+    if(ch === ERASE_MARK){
+      // ESC[2K: Zeileninhalt verwerfen.
+      conLine = "";
+      conCol  = 0;
+    }else if(ch === "\r"){
+      // Nur der Cursor springt auf Spalte 0. CR loescht NICHTS — sonst
+      // verschwindet bei CRLF der Text direkt vor dem Zeilenumbruch.
+      conCol = 0;
+    }else if(ch === "\n"){
+      conLines.push(conLine);
+      conLine = "";
+      conCol  = 0;
+    }else{
+      // Ueberschreiben statt anhaengen, damit ein Prompt-Neuaufbau nach CR
+      // die alte Zeile ersetzt.
+      conLine = (conCol < conLine.length)
+        ? conLine.slice(0, conCol) + ch + conLine.slice(conCol + 1)
+        : conLine + ch;
+      conCol++;
+    }
+  }
+  if(conLines.length > 2000) conLines = conLines.slice(-1500);
+}
+
+function paintConsole(){
+  const box = $("con");
+  box.textContent = conLines.concat(conLine ? [conLine] : []).join("\n");
+  if($("follow").checked) box.scrollTop = box.scrollHeight;
+}
+
+async function pollConsole(){
+  if(conBusy) return;
+  conBusy = true;
+  try{
+    // Ein Abruf liefert hoechstens 4 KB. Ein gespraechiges Ziel — eine
+    // OpenKNX-Firmware schreibt beim Start mehrere Kilobyte — haette damit
+    // dauerhaft Rueckstand, und die Anzeige haengt um Sekunden nach. Deshalb
+    // wird bei gesetztem "more" sofort weitergeholt statt auf den naechsten
+    // Takt zu warten.
+    let more = true, guard = 0, got = false;
+
+    while(more && guard++ < 24){
+      const url = "/api/console" + (cursor === null ? "" : "?cursor=" + cursor);
+      const r = await (await fetch(url, {cache:"no-store"})).json();
+      cursor = r.cursor;
+      more   = r.more;
+
+      if(r.skipped > 0){
+        conLines.push("[… " + r.skipped + " Bytes verloren, Puffer übergelaufen …]");
+        got = true;
+      }
+      if(r.data){
+        feedConsole(r.data);
+        got = true;
+      }
+    }
+
+    if(got) paintConsole();
+    $("constate").textContent = more ? "holt noch nach…" : "aktuell";
+    $("constate").className   = "pill ok";
+  }catch(e){
+    $("constate").textContent = "keine Verbindung";
+    $("constate").className   = "pill err";
+  }finally{
+    conBusy = false;
+  }
+}
+
+$("clear").addEventListener("click", () => {
+  conLines = [];
+  conLine = "";
+  conCol = 0;
+  paintConsole();
+});
+
+$("file").addEventListener("change", () => { $("go").disabled = !$("file").files.length; });
+$("uf2").addEventListener("change", () => { poll(); });
+
+$("go").addEventListener("click", () => {
+  const f = $("file").files[0];
+  if(!f) return;
+  $("go").disabled = true;
+  $("bar").hidden = false;
+  $("msg").className = "msg";
+  $("msg").textContent = "übertrage " + (f.size/1024).toFixed(0) + " KB…";
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/update");
+  xhr.upload.onprogress = e => { if(e.lengthComputable) $("bar").value = e.loaded/e.total*100; };
+  xhr.onload = () => {
+    if(xhr.status === 200){
+      $("msg").className = "msg ok";
+      $("msg").textContent = "Geschrieben. Die Probe startet neu…";
+      setTimeout(() => location.reload(), 8000);
+    }else{
+      $("msg").className = "msg err";
+      $("msg").textContent = "Fehlgeschlagen: " + xhr.responseText;
+      $("go").disabled = false;
+    }
+  };
+  xhr.onerror = () => {
+    $("msg").className = "msg err";
+    $("msg").textContent = "Übertragung abgebrochen.";
+    $("go").disabled = false;
+  };
+  xhr.send(f);
+});
+
+$("goflash").addEventListener("click", () => {
+  const f = $("uf2").files[0];
+  if(!f) return;
+  $("goflash").disabled = true;
+  $("fbar").hidden = false;
+  $("fmsg").className = "msg";
+  $("fmsg").textContent = "übertrage " + (f.size/1024).toFixed(0) + " KB…";
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/flash");
+  xhr.upload.onprogress = e => { if(e.lengthComputable) $("fbar").value = e.loaded/e.total*100; };
+  // Nach dem Upload kommt erst der Touch (bis zu 2x5 s), dann das Schreiben.
+  xhr.upload.onload = () => {
+    $("fmsg").textContent = "übertragen, hole das Ziel nach BOOTSEL…";
+  };
+  xhr.onload = () => {
+    let r = {};
+    try { r = JSON.parse(xhr.responseText); } catch(e) {}
+    if(xhr.status === 200){
+      $("fmsg").className = "msg ok";
+      $("fmsg").textContent = "Geschrieben: " + r.written + " von " + r.blocks
+                            + " Blöcken. Das Zielgerät startet neu.";
+    }else{
+      $("fmsg").className = "msg err";
+      $("fmsg").textContent = "Abgelehnt: " + (r.error || xhr.responseText);
+    }
+  };
+  xhr.onerror = () => {
+    $("fmsg").className = "msg err";
+    $("fmsg").textContent = "Übertragung abgebrochen.";
+  };
+  xhr.send(f);
+});
+
+// --- Kommandos ans Ziel ----------------------------------------------------
+// Die OpenKNX-Konsole reagiert auf einzelne Zeichen, andere Firmware wartet auf
+// eine abgeschlossene Zeile. Deshalb ist das Zeilenende waehlbar und wird nicht
+// hier, sondern in der Firmware angehaengt (siehe POST /api/console).
+const cmdHistory = [];
+let   histPos    = -1;   // -1 = nicht im Verlauf, sondern in der Eingabe
+
+async function sendCommand(){
+  const el   = $("cmd");
+  const text = el.value;
+  const eol  = $("eol").value;
+  if(!text && eol === "none") return;      // waere ein leerer Schreibzugriff
+
+  $("gosend").disabled = true;
+  try{
+    const r = await fetch("/api/console?eol=" + encodeURIComponent(eol),
+                          {method:"POST", body:text});
+    if(r.ok){
+      if(text && cmdHistory[0] !== text) cmdHistory.unshift(text);
+      histPos = -1;
+      el.value = "";
+      $("cmdnote").dataset.kind = "result";
+      $("cmdnote").className    = "note";
+      $("cmdnote").textContent  = "gesendet. Die Antwort erscheint oben im Mitschnitt.";
+    }else{
+      let j = {};
+      try{ j = await r.json(); }catch(e){}
+      $("cmdnote").dataset.kind = "result";
+      $("cmdnote").className    = "note err";
+      $("cmdnote").textContent  = "nicht gesendet: " + (j.error || ("HTTP " + r.status));
+    }
+  }catch(e){
+    $("cmdnote").dataset.kind = "result";
+    $("cmdnote").className    = "note err";
+    $("cmdnote").textContent  = "keine Verbindung zur Probe.";
+  }
+  $("gosend").disabled = $("cmd").disabled;
+  el.focus();
+}
+
+$("gosend").addEventListener("click", sendCommand);
+
+$("cmd").addEventListener("keydown", e => {
+  if(e.key === "Enter"){ e.preventDefault(); sendCommand(); return; }
+
+  // Verlauf durchblaettern — bei einer Debug-Konsole tippt man dasselbe oft.
+  if(e.key === "ArrowUp" && histPos + 1 < cmdHistory.length){
+    e.preventDefault();
+    $("cmd").value = cmdHistory[++histPos];
+  }else if(e.key === "ArrowDown"){
+    e.preventDefault();
+    if(histPos > 0)       $("cmd").value = cmdHistory[--histPos];
+    else if(histPos === 0){ histPos = -1; $("cmd").value = ""; }
+  }
+});
+
+$("forget").addEventListener("click", async () => {
+  if(!confirm("WLAN-Zugangsdaten löschen? Die Probe startet danach im Setup-Portal.")) return;
+  await fetch("/api/wifi/forget", {method:"POST"});
+});
+
+poll();
+pollConsole();
+setInterval(poll, 2000);
+setInterval(pollConsole, 700);
+</script>
+</body>
+</html>

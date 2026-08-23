@@ -1,0 +1,28 @@
+# PlatformIO
+.pio/
+
+# ESP-IDF (von PlatformIO erzeugt)
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.*
+!firmware/sdkconfig.defaults
+firmware/managed_components/
+firmware/dependencies.lock
+
+# aus components/*/web/*.html erzeugt (tools/embed_web.py)
+firmware/components/*/include/generated/
+
+# PlatformIOs ESP-IDF-Builder uebergibt -Wl,-Map mit unescapten Backslashes;
+# die Linker-Map landet deshalb mit zerlegtem Namen im firmware/-Ordner.
+firmware/*.map
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# Arbeitsnotizen: bleiben lokal, enthalten Netzwerkdetails des Pruefstands.
+CLAUDE.md
+
+# Entscheidungsdokumente: bleiben lokal.
+docs/decisions/

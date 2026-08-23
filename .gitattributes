@@ -1,0 +1,7 @@
+# Zeilenenden im Repo einheitlich LF, im Arbeitsverzeichnis wie das System will.
+* text=auto eol=lf
+
+# Binaerdateien nicht anfassen.
+*.png binary
+*.uf2 binary
+*.bin binary

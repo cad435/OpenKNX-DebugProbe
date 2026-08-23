@@ -1,0 +1,74 @@
+# OpenKNX DebugProbe — Projektvorgaben
+# Nach Aenderungen hier: sdkconfig.* loeschen und neu erzeugen lassen.
+# Zielhardware: ESP32-S3FH4R2 (4 MB embedded Flash, 2 MB PSRAM quad)
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Flash / Partitionen -----------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# DIO fuer das erste Bring-up: bootet auf jeder S3-Variante. Auf QIO umstellen,
+# sobald die Hardware steht (eFuse meldet quad).
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- PSRAM -------------------------------------------------------------------
+# 2 MB quad. Ersetzt die UF2-Staging-Partition: die Firmware des Zielgeraets
+# wird hier gepuffert und validiert, bevor sie ans Ziel geht.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# --- OTA mit Rollback --------------------------------------------------------
+# Ein frisch geflashtes Image gilt als PENDING_VERIFY. Bestaetigt die Anwendung
+# es nicht (OtaUpdater::confirmRunningImage), faellt der Bootloader beim
+# naechsten Start auf das vorherige Image zurueck. Schutz gegen Selbst-Bricken.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- HTTP-Server -------------------------------------------------------------
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+
+# --- Netz --------------------------------------------------------------------
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_SO_RCVBUF=y
+
+# --- Takt ---------------------------------------------------------------------
+# Default waere 160 MHz. Der USB-Host-Stack und WiFi laufen spaeter parallel auf
+# getrennten Cores, dafuer nehmen wir den vollen Takt mit.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# --- Tasks / Debug -----------------------------------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# --- Konsole -----------------------------------------------------------------
+# UART0 (GPIO43 TX / GPIO44 RX) auf einen externen USB-UART-Adapter.
+# Bewusst NICHT USB-Serial-JTAG: der liegt auf GPIO19/20 und faellt weg, sobald
+# der OTG-Port als USB-Host arbeitet. Ausserdem war er praktisch nicht lesbar
+# (0 Bytes, siehe docs/hardware.md).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- Optimierung --------------------------------------------------------------
+# ESP-IDF steht per Default auf -Og. Damit erzeugt xtensa-esp-elf 14.2.0 beim
+# Uebersetzen von esp_lcd/rgb/esp_lcd_panel_rgb.c reproduzierbar einen internen
+# Compilerfehler (Segfault im RTL-Pass "ira"). Mit -Os tritt er nicht auf, und
+# -Os ist fuer ein Auslieferungsimage ohnehin die passendere Wahl.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# --- C++ ---------------------------------------------------------------------
+# Exceptions muessen an bleiben: espressif/usb_host_vcp benutzt try/catch und
+# laesst sich sonst nicht uebersetzen ("exception handling disabled").
+# Der eigene Code kommt weiterhin ohne Exceptions aus.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_RTTI=n

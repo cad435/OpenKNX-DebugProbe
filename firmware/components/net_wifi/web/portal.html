@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenKNX DebugProbe — Setup</title>
+<style>
+:root{--bg:#f7f7f8;--fg:#1b1b1f;--mut:#6b6b76;--card:#fff;--line:#e2e2e8;--acc:#1f6feb}
+@media(prefers-color-scheme:dark){:root{--bg:#141417;--fg:#eceef2;--mut:#9a9aa6;--card:#1d1d22;--line:#2c2c34;--acc:#4f8ef7}}
+*{box-sizing:border-box}
+body{margin:0;padding:1.5rem;background:var(--bg);color:var(--fg);
+     font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:26rem;margin:0 auto}
+h1{font-size:1.2rem;margin:0 0 .25rem}
+p.sub{color:var(--mut);font-size:.875rem;margin:0 0 1.5rem}
+form{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1.25rem}
+label{display:block;font-size:.8rem;color:var(--mut);margin:0 0 .3rem}
+select,input{width:100%;font:inherit;padding:.55rem .6rem;margin-bottom:1rem;
+             border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg)}
+button{width:100%;font:inherit;padding:.6rem;border:0;border-radius:7px;
+       background:var(--acc);color:#fff;cursor:pointer}
+button.link{background:none;color:var(--acc);width:auto;padding:.2rem 0;font-size:.85rem}
+.hint{font-size:.8rem;color:var(--mut);margin:.5rem 0 0}
+</style>
+</head>
+<body>
+<main>
+  <h1>OpenKNX DebugProbe</h1>
+  <p class="sub">Erstinbetriebnahme — WLAN auswählen.</p>
+
+  <form method="POST" action="/api/wifi/connect">
+    <label for="ssid">Netzwerk</label>
+    <select id="ssid-list" name="ssid">
+      <option value="">suche…</option>
+    </select>
+    <button type="button" class="link" id="manual">Netzwerk manuell eingeben</button>
+
+    <label for="pass" style="margin-top:1rem">Passwort</label>
+    <input type="password" id="pass" name="pass" autocomplete="off">
+
+    <label for="name">Gerätename</label>
+    <input type="text" id="name" name="name" placeholder="openknx-probe" pattern="[a-z0-9\-]{3,30}">
+    <p class="hint" style="margin:-.75rem 0 1rem">
+      Erreichbar als <code>&lt;name&gt;.local</code>. Bei mehreren Probes je einen
+      eigenen Namen vergeben.
+    </p>
+
+    <button type="submit">Verbinden und neu starten</button>
+  </form>
+</main>
+
+<script>
+const list = document.getElementById("ssid-list");
+
+async function scan(){
+  try{
+    const nets = await (await fetch("/api/scan")).json();
+    nets.sort((a,b) => b.rssi - a.rssi);
+    list.innerHTML = "";
+    if(!nets.length){
+      list.innerHTML = '<option value="">kein Netz gefunden</option>';
+      return;
+    }
+    for(const n of nets){
+      const o = document.createElement("option");
+      o.value = n.ssid;
+      o.textContent = n.ssid + "   " + n.rssi + " dBm" + (n.open ? "  (offen)" : "");
+      list.appendChild(o);
+    }
+  }catch(e){
+    list.innerHTML = '<option value="">Scan fehlgeschlagen</option>';
+  }
+}
+
+document.getElementById("manual").addEventListener("click", () => {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.name = "ssid";
+  input.id = "ssid-list";
+  input.placeholder = "SSID";
+  list.replaceWith(input);
+  document.getElementById("manual").remove();
+});
+
+scan();
+</script>
+</body>
+</html>

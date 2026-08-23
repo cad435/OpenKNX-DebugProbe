@@ -1,0 +1,24 @@
+# OpenKNX DebugProbe — Partitionstabelle für 4 MB Flash (ESP32-S3FH4R2)
+#
+# Diese Tabelle ist bewusst JETZT final festgelegt: sie nachträglich zu ändern
+# erfordert einen seriellen Reflash, und genau den wollen wir im Feld vermeiden.
+#
+# ota_0 MUSS bei 0x10000 beginnen — das ist der App-Offset, den PlatformIO und
+# esptool voraussetzen. Liegt die erste App-Partition woanders, wird die App an
+# eine Adresse geschrieben, an der der Bootloader sie nicht sucht: kein Boot,
+# keine Ausgabe, kein Fehler.
+#
+# ota_0 / ota_1 : zwei App-Slots à 1,875 MB für OTA mit Rollback
+# storage       : 192 KB Reserve für Logs/Konfiguration
+#
+# Kein Staging-Bereich für die UF2 des Zielgeräts: bei 4 MB Flash bliebe dafür
+# zu wenig übrig. Die UF2 wird stattdessen im PSRAM (2 MB) gepuffert und
+# validiert — siehe docs/architecture.md.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x4000,
+otadata,    data, ota,      0xD000,   0x2000,
+phy_init,   data, phy,      0xF000,   0x1000,
+ota_0,      app,  ota_0,    0x10000,  0x1E0000,
+ota_1,      app,  ota_1,    0x1F0000, 0x1E0000,
+storage,    data, spiffs,   0x3D0000, 0x30000,

@@ -1,0 +1,18 @@
+dependencies:
+  idf:
+    version: ">=5.1"
+
+  # Echtes USB-CDC-ACM: RP2040, ESP32-S2/S3/C3, STM32 VCP
+  espressif/usb_host_cdc_acm: "*"
+
+  # Gemeinsame Klammer für die vendor-specific UART-Bridges. Waehlt den Treiber
+  # anhand VID/PID selbst aus. Pflicht fuer die OpenKNX-Geraete mit klassischem
+  # ESP32, die ohne native USB-Peripherie einen Bridge-Chip auf dem Board haben.
+  espressif/usb_host_vcp: "*"
+  espressif/usb_host_ch34x_vcp: "*"
+  espressif/usb_host_cp210x_vcp: "*"
+  espressif/usb_host_ftdi_vcp: "*"
+
+  # Massenspeicher — der RP2040 meldet sich im BOOTSEL-Modus als MSC, darueber
+  # laeuft spaeter das UF2-Schreiben.
+  espressif/usb_host_msc: "*"

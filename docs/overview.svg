@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="330" viewBox="0 0 1000 330" font-family="Segoe UI, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="6.5" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#1f6feb"/></marker><marker id="g" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="6.5" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#4b5563"/></marker></defs>
+<rect width="1000" height="330" fill="#ffffff"/>
+<text x="40" y="44" font-size="20" font-weight="600" fill="#16181d">OpenKNX DebugProbe</text>
+<text x="40" y="66" font-size="13" fill="#6b7280">Konsole und Firmware-Update über WLAN, ein USB-C-Kabel zum Gerät</text>
+<rect x="40" y="130" width="170" height="100" rx="10" fill="#f9fafb" stroke="#cbd2db" stroke-width="1.6"/>
+<text x="125.0" y="174.0" font-size="16" font-weight="600" fill="#16181d" text-anchor="middle">Entwickler-PC</text>
+<text x="125.0" y="196.0" font-size="12.5" fill="#7c8493" text-anchor="middle">pio · esptool · Browser</text>
+<rect x="440" y="118" width="215" height="124" rx="10" fill="#f9fafb" stroke="#cbd2db" stroke-width="1.6"/>
+<text x="547.5" y="174.0" font-size="16" font-weight="600" fill="#16181d" text-anchor="middle">ESP32-S3 Probe</text>
+<text x="547.5" y="196.0" font-size="12.5" fill="#7c8493" text-anchor="middle">openknx-probe-….local</text>
+<rect x="790" y="130" width="170" height="100" rx="10" fill="#f9fafb" stroke="#cbd2db" stroke-width="1.6"/>
+<text x="875.0" y="174.0" font-size="16" font-weight="600" fill="#16181d" text-anchor="middle">OpenKNX-Gerät</text>
+<text x="875.0" y="196.0" font-size="12.5" fill="#7c8493" text-anchor="middle">RP2040 / ESP32</text>
+<line x1="214" y1="152" x2="436" y2="152" stroke="#1f6feb" stroke-width="1.8" marker-end="url(#a)"/>
+<text x="322" y="144" font-size="12" fill="#1f4fa8" font-weight="600" text-anchor="middle" font-family="Consolas, monospace">2323 · Konsole</text>
+<line x1="214" y1="180" x2="436" y2="180" stroke="#1f6feb" stroke-width="1.8" marker-end="url(#a)"/>
+<text x="322" y="172" font-size="12" fill="#1f4fa8" font-weight="600" text-anchor="middle" font-family="Consolas, monospace">4000 · Flashen</text>
+<line x1="214" y1="208" x2="436" y2="208" stroke="#1f6feb" stroke-width="1.8" marker-end="url(#a)"/>
+<text x="322" y="200" font-size="12" fill="#1f4fa8" font-weight="600" text-anchor="middle" font-family="Consolas, monospace">80 · Web-UI</text>
+<text x="322" y="240" font-size="13" font-weight="600" fill="#1f4fa8" text-anchor="middle">WLAN</text>
+<line x1="659" y1="180" x2="786" y2="180" stroke="#4b5563" stroke-width="2.4" marker-end="url(#g)"/>
+<text x="722" y="170" font-size="13" font-weight="600" fill="#374151" text-anchor="middle">USB-C</text>
+<text x="722" y="200" font-size="11.5" fill="#8b93a1" text-anchor="middle">Host</text>
+<text x="40" y="292" font-size="12" fill="#6b7280">Das Gerät wird vom KNX-Bus versorgt. VBUS ist nur Erkennungssignal.</text>
+<text x="40" y="312" font-size="12" fill="#6b7280">Die Konsole überlebt Resets des Geräts und liefert beim Verbinden den Mitschnitt nach.</text>
+</svg>
