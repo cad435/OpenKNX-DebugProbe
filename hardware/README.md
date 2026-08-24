@@ -43,7 +43,7 @@ power.
 On the bench it is different — a bare RP2040 devkit is USB powered and draws real current
 from VBUS.
 
-## Assembled prototype
+## Proof-of-Concept prototype
 
 ![Power supply chain of the prototype](hardware-prototyp.png)
 
