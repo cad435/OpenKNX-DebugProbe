@@ -76,6 +76,8 @@ The module's RGB LED (WS2812 on GPIO48) shows the operating state. Highest urgen
 Brightness is capped well below maximum. A WS2812 at full white draws around 60 mA, which
 matters on battery.
 
+## PlatformIO integration
+
 No extra hardware is needed on the PC side — a few lines in the target project's
 `platformio.ini` are enough. The probe hands them out itself, since it knows its own name
 and what is plugged in:
