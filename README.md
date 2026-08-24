@@ -78,13 +78,17 @@ The current mode is reported as `led.mode` in `/api/status`.
 Brightness is capped well below maximum. A WS2812 at full white draws around 60 mA, which
 matters on battery.
 
-Two more LEDs sit on the SuperMini. They are wired in hardware, the firmware does not
-control them:
+Two more LEDs sit on the SuperMini:
 
 | LED | Meaning |
 |---|---|
-| red | solid while the board is powered **externally** — from the bus or from USB. It stays dark when the probe runs on the battery alone, so it tells you which source is feeding the board. |
 | blue | the Li-ion charger: on while charging, off once the cell is full, blinking when no cell is connected. |
+| red | **shares GPIO48 with the RGB LED.** It lights while the pin is left alone and stays dark as soon as the firmware drives the WS2812 — so on this firmware it is permanently off. |
+
+The shared pin was confirmed on hardware: moving the status LED to another pin brings the
+red one back, moving it to GPIO48 turns it off again. It is therefore not a power indicator,
+and the RGB LED costs you the red one. If you would rather keep the red LED, point the
+status LED at a free pin with `POST /api/led?gpio=N` — the value is stored in NVS.
 
 ## PlatformIO integration
 
