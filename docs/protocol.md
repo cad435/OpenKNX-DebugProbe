@@ -1,57 +1,55 @@
-# Schnittstellen
+# Interfaces
 
-Legende: **[live]** = implementiert und am Gerät verifiziert, **[geplant]** = Zielbild,
-**[verworfen]** = bewusst nicht gebaut, mit Begründung.
+Legend: **[live]** = implemented and verified on real hardware.
 
-Bei Uploads wird der Dateiinhalt immer als **roher Request-Body** übertragen
-(`--data-binary`), nicht als Multipart. Das spart einen Multipart-Parser auf der Probe
-und funktioniert aus Browser (`fetch(url, {method:"POST", body: file})`) wie aus `curl`
-gleichermaßen.
+For uploads the file content is always transferred as the **raw request body**
+(`--data-binary`), never as multipart. That saves a multipart parser on the probe and works
+equally well from a browser (`fetch(url, {method:"POST", body: file})`) and from `curl`.
 
-## Auffindbarkeit
+## Discovery
 
-mDNS-Hostname aus dem Portal, Default `openknx-probe-<mac>` (z. B.
-`openknx-probe-xxxx.local`). Service `_http._tcp`, Instanzname
+mDNS hostname from the portal, default `openknx-probe-<mac>` (e.g.
+`openknx-probe-xxxx.local`). Service `_http._tcp`, instance name
 "OpenKNX DebugProbe". **[live]**
 
-## TCP — serielle Konsole des Zielgeräts **[live]**
+## TCP — the target's serial console **[live]**
 
-| Port | Protokoll | wofür |
+| Port | Protocol | Used for |
 |---|---|---|
-| 2323 | roh, transparent | Monitor, Terminal |
-| 4000 | RFC2217 (Telnet + COM-PORT-OPTION) | alles mit Baudrate und DTR/RTS |
+| 2323 | raw, transparent | monitor, terminal |
+| 4000 | RFC2217 (Telnet + COM-PORT-OPTION) | anything needing baud rate and DTR/RTS |
 
-Beide teilen sich denselben 16-KB-Mitschnitt und können gleichzeitig verbunden sein.
+Both share the same 16 KB backlog and may be connected at the same time.
 
-Verhalten auf **2323**:
+Behaviour on **2323**:
 
-- Beim Verbinden erst eine Statuszeile `[probe] …`, dann der Mitschnitt — also auch die
-  Boot-Meldungen, die vor dem Verbinden aufliefen.
-- Verschwindet das Ziel (Reset/Flash), **bleibt die TCP-Verbindung bestehen**; der
-  Zustandswechsel erscheint als `[probe]`-Zeile im Strom.
-- Ein Client gleichzeitig.
+- On connect you first get a status line `[probe] …`, then the backlog — including the boot
+  messages that appeared before you connected.
+- If the target disappears (reset or flash), **the TCP connection stays up**; the state
+  change appears as a `[probe]` line in the stream.
+- One client at a time.
 
-Verhalten auf **4000**:
+Behaviour on **4000**:
 
-- Startet beim aktuellen Ende des Puffers, nicht bei dessen Anfang — ein Flash-Werkzeug
-  soll keine alten Konsolenausgaben in seinem Protokollstrom finden.
-- Unterstützte Subnegotiationen: `SET_BAUDRATE`, `SET_DATASIZE`, `SET_PARITY`,
-  `SET_STOPSIZE`, `SET_CONTROL` (DTR/RTS), `SET_LINESTATE_MASK`, `SET_MODEMSTATE_MASK`,
-  `PURGE_DATA`. BREAK wird noch nicht durchgereicht.
-- 0xFF im Nutzdatenstrom wird in beide Richtungen verdoppelt.
+- Starts at the current end of the buffer, not at its beginning — a flashing tool should not
+  find old console output in its protocol stream.
+- Supported subnegotiations: `SET_BAUDRATE`, `SET_DATASIZE`, `SET_PARITY`, `SET_STOPSIZE`,
+  `SET_CONTROL` (DTR/RTS), `SET_LINESTATE_MASK`, `SET_MODEMSTATE_MASK`, `PURGE_DATA`. BREAK
+  is not passed through yet.
+- 0xFF in the payload stream is doubled in both directions.
 
-PC-Seite:
+PC side:
 
 ```
 monitor_port = socket://openknx-probe-xxxx.local:2323
 esptool --port rfc2217://openknx-probe-xxxx.local:4000 write_flash ...
 ```
 
-## HTTP-API
+## HTTP API
 
 ### `GET /` **[live]**
 
-Status- und Update-Seite. Im Portal-Modus stattdessen das Provisioning-Formular.
+Status and update page. In portal mode the provisioning form instead.
 
 ### `GET /api/status` **[live]**
 
@@ -75,76 +73,75 @@ Status- und Update-Seite. Im Portal-Modus stattdessen das Provisioning-Formular.
 ```
 
 `wifi`: `idle` | `connecting` | `connected` | `portal`
-`pending_verify`: `true`, solange ein frisch geflashtes Image noch auf Probation ist.
-`target` und `console` fehlen, solange der USB-Host nicht gestartet ist; die Felder
-innerhalb von `target` gibt es nur im Zustand `connected`.
+`pending_verify`: `true` while a freshly flashed image is still on probation.
+`target` and `console` are absent while the USB host has not been started; the fields inside
+`target` only exist in state `connected`.
 
-Ein Aufruf reicht dem Web-UI für die ganze Seite — es pollt nur diese eine Route.
+One call is enough for the whole web UI page — it polls this single route.
 
-### `POST /api/update` **[live]** — Firmware der **Probe**
+### `POST /api/update` **[live]** — firmware of the **probe**
 
-Roher Body mit dem ESP32-Anwendungsimage. Schreibt in den inaktiven OTA-Slot und startet
-danach neu.
+Raw body with the ESP32 application image. Writes into the inactive OTA slot and reboots
+afterwards.
 
 ```powershell
 curl.exe --fail-with-body --data-binary "@firmware/.pio/build/probe/firmware.bin" http://…/api/update
 ```
 
-| Status | Bedeutung |
+| Status | Meaning |
 |---|---|
-| 200 | geschrieben, Neustart folgt (`{"status":"ok","partition":"ota_1"}`) |
-| 400 | kein gültiges ESP32-Image, falsches Projekt oder Prüfsumme falsch — **nichts geschrieben** |
-| 409 | es läuft bereits ein Update |
-| 413 | Image größer als der OTA-Slot |
+| 200 | written, reboot follows (`{"status":"ok","partition":"ota_1"}`) |
+| 400 | not a valid ESP32 image, wrong project, or bad checksum — **nothing was written** |
+| 409 | an update is already running |
+| 413 | image larger than the OTA slot |
 
-Geprüft wird vor dem ersten Schreibzugriff: Image-Magic `0xE9`, vorhandener
-`esp_app_desc_t` und übereinstimmender Projektname. Damit landet insbesondere keine UF2,
-die eigentlich fürs Zielgerät gedacht war, versehentlich im ESP32.
+Checked before the first write: image magic `0xE9`, a present `esp_app_desc_t`, and a
+matching project name. In particular this keeps a UF2 that was actually meant for the target
+from ending up in the ESP32 by accident.
 
 ### `GET /api/scan` **[live]**
 
-Liste der sichtbaren WLANs, nach Signalstärke sortierbar:
-`[{"ssid":"…","rssi":-43,"open":false}, …]` (max. 20 Einträge).
+List of visible WiFi networks, sortable by signal strength:
+`[{"ssid":"…","rssi":-43,"open":false}, …]` (max. 20 entries).
 
 ### `POST /api/wifi/connect` **[live]**
 
-`application/x-www-form-urlencoded` mit `ssid`, `pass`, optional `name` (Gerätename).
-Speichert in NVS und startet neu. Wird vom Captive Portal benutzt.
+`application/x-www-form-urlencoded` with `ssid`, `pass`, optionally `name` (device name).
+Stores to NVS and reboots. Used by the captive portal.
 
 ### `POST /api/wifi/forget` **[live]**
 
-Löscht die gespeicherten Zugangsdaten und startet ins Portal.
+Erases the stored credentials and reboots into the portal.
 
 ---
 
-### `POST /api/flash` **[live]** — Firmware des **Zielgeräts**
+### `POST /api/flash` **[live]** — firmware of the **target**
 
-Roher Body mit der UF2. Wird im PSRAM gepuffert, **vollständig validiert** und erst dann
-in rohen 512-Byte-Sektoren geschrieben. Geprüft werden Magics, Blockkette, `numBlocks`
-und Family-ID; schlägt etwas fehl, geht kein einziger Sektor ans Ziel.
+Raw body with the UF2. It is buffered in PSRAM, **fully validated**, and only then written
+as raw 512-byte sectors. Magics, the block chain, `numBlocks` and the family ID are checked;
+if anything fails, not a single sector reaches the target.
 
-Läuft das Ziel noch seine Anwendung, schickt der Endpunkt es **selbst** per
-1200-Baud-Touch nach BOOTSEL — erst nach der Validierung, damit eine kaputte Datei das
-Ziel nicht aus seiner Anwendung reisst. Taster drücken muss dafür niemand. Steht das Ziel
-schon im BOOTSEL, wird nichts angefasst.
+If the target is still running its application, the endpoint pushes it into BOOTSEL
+**itself** with a 1200-baud touch — only after validation, so a broken file cannot tear the
+target out of its application. Nobody has to press a button. If the target already sits in
+BOOTSEL, nothing is touched.
 
 ```powershell
 curl.exe --fail-with-body --data-binary "@firmware.uf2" http://openknx-probe-xxxx.local/api/flash
 ```
 
-| Status | Bedeutung |
+| Status | Meaning |
 |---|---|
-| 200 | geschrieben (`{"blocks":…,"written":…}`), Ziel startet neu |
-| 400 | UF2 ungültig — es wurde **nichts** am Ziel verändert |
-| 409 | Touch versucht, aber kein BOOTSEL erreicht (Grund im `error`) |
-| 413 | kein Speicher für die Datei |
-| 502 | Schreibfehler mitten im Vorgang |
+| 200 | written (`{"blocks":…,"written":…}`), the target reboots |
+| 400 | invalid UF2 — **nothing** on the target was changed |
+| 409 | touch attempted, but BOOTSEL not reached (reason in `error`) |
+| 413 | no memory for the file |
+| 502 | write error midway through |
 
-Jede Ablehnung nennt den Grund in `{"error":…}`. Geprüft wird in der Reihenfolge, in der
-die Ursachen tatsächlich vorkommen: **zuerst das Magic am Dateianfang**, erst danach die
-Grösse. Umgekehrt bekäme der häufigste Fall — eine versehentlich geschickte
-`firmware.bin` — die Meldung „kein Vielfaches von 512", und die zeigt in die falsche
-Richtung.
+Every rejection names its reason in `{"error":…}`. Checks run in the order in which the
+causes actually occur: **the magic at the start of the file first**, only then the size. The
+other way round, the most common case — an accidentally sent `firmware.bin` — would get
+"not a multiple of 512", and that points in the wrong direction.
 
 ```json
 {"error":"kein UF2-Magic (0x0A324655) am Dateianfang, sondern 0x20003FFC, 572636 Byte
@@ -152,107 +149,94 @@ Richtung.
           \"@$BUILD_DIR/${PROGNAME}.uf2\" statt \"@$SOURCE\" verwenden."}
 ```
 
-Dafür entscheidet die Probe bereits nach den ersten 512 Byte, **bevor** sie Speicher für
-die Datei anfordert. Damit der Text auch im PlatformIO-Log landet, gehört in das Snippet
-`--fail-with-body` statt `-f`: mit `-f` verschluckt curl den Body und übrig bleibt nur
-`curl: (22)`.
+The probe decides this after the first 512 bytes, **before** it requests memory for the
+file. For the text to also show up in the PlatformIO log, the snippet needs
+`--fail-with-body` instead of `-f`: with `-f`, curl swallows the body and all that remains
+is `curl: (22)`.
 
-`?validate_only=1` prüft die Datei, ohne zu schreiben, und liefert
+`?validate_only=1` checks the file without writing and returns
 `{"blocks":…,"payload_bytes":…,"first_address":…,"family":…,"status":"valid"}`.
 
-Den BOOTSEL-Modus stellt der Endpunkt selbst her (1200-Baud-Touch, siehe oben) —
-**solange die Firmware des Ziels noch enumeriert**. Nur wenn sie das nicht mehr tut, muss
-jemand ran: BOOTSEL und RUN sind an der Frontblende bedienbar, und die Probe erkennt den
-Zustandswechsel von selbst. Ein Power-Cycle über VBUS hilft dort ausdrücklich nicht, weil
-alle OpenKNX-Geräte KNX-bus-gespeist sind — siehe [hardware.md](hardware.md).
-
-### `POST /api/reset` **[verworfen]**
-
-Setzte einen Power-Cycle über VBUS voraus. Bei busgespeisten Zielen bewirkt der keinen
-Reset — siehe [hardware.md](hardware.md). Über RFC2217 lässt sich DTR/RTS durchreichen,
-was bei ESP32-Zielen den Auto-Reset auslöst.
-
-Die ursprünglich mitverworfene Idee `POST /api/bootsel` ist dagegen **umgesetzt**, nur auf
-einem anderen Weg: nicht über VBUS, sondern über den 1200-Baud-Touch auf der CDC. Siehe
-den eigenen Abschnitt weiter unten.
+The endpoint establishes BOOTSEL mode itself (1200-baud touch, see above) — **as long as the
+target's firmware still enumerates**. Only when it no longer does, somebody has to step in:
+BOOTSEL and RUN are accessible from the front panel, and the probe detects the state change
+by itself. A power cycle over VBUS explicitly does not help there, because all OpenKNX
+devices are KNX bus powered — see [hardware.md](../hardware/hardware.md).
 
 ### `GET /api/console?cursor=N` **[live]**
 
-Der Mitschnitt der Zielkonsole für den Browser. `cursor` ist eine **absolute** Position
-im Datenstrom, kein Ringpuffer-Index; ohne Parameter kommt der gesamte vorhandene Puffer.
+The target console's backlog for the browser. `cursor` is an **absolute** position in the
+stream, not a ring-buffer index; without the parameter you get the entire available buffer.
 
 ```json
 { "cursor": 20480, "skipped": 0, "more": false, "data": "…" }
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 |---|---|
-| `cursor` | mit diesem Wert den nächsten Abruf stellen |
-| `skipped` | so viele Bytes sind überschrieben worden, bevor sie abgeholt wurden |
-| `more` | es liegt noch mehr an — sofort erneut abrufen, ohne zu warten |
-| `data` | die Rohbytes, JSON-escapt (Steuerzeichen als `\u00XX`) |
+| `cursor` | use this value for the next request |
+| `skipped` | this many bytes were overwritten before they were fetched |
+| `more` | there is more waiting — fetch again immediately, without waiting |
+| `data` | the raw bytes, JSON-escaped (control characters as `\u00XX`) |
 
-Pro Antwort höchstens 4 KB, damit eine Antwort weder den Heap noch den Browser
-belastet; deshalb das `more`-Flag.
+At most 4 KB per response, so that a single response burdens neither the heap nor the
+browser; hence the `more` flag.
 
-Die Rohbytes bleiben roh: CR, LF und ANSI-Sequenzen kommen unverändert durch. Die
-OpenKNX-Konsole schreibt ihren Prompt nach jeder Logzeile neu und radiert ihn beim
-nächsten Mal mit `ESC[2K` weg — das Web-UI führt dafür eine kleine
-Zeilen-Zustandsmaschine (CR bewegt nur den Cursor, es löscht nichts).
+The raw bytes stay raw: CR, LF and ANSI sequences pass through unchanged. The OpenKNX
+console rewrites its prompt after every log line and erases it next time with `ESC[2K` — the
+web UI runs a small line state machine for that (CR only moves the cursor, it erases
+nothing).
 
-`/api/status` führt dazu `radio_awake`: `true`, solange ein Client auf 2323 oder 4000
-hängt und der Funk deshalb mit `WIFI_PS_NONE` läuft, sonst `false` (`WIFI_PS_MIN_MODEM`).
-HTTP selbst hält den Funk **nicht** wach.
+`/api/status` carries `radio_awake` alongside: `true` while a client is attached to 2323 or
+4000 and the radio therefore runs with `WIFI_PS_NONE`, otherwise `false`
+(`WIFI_PS_MIN_MODEM`). HTTP itself does **not** keep the radio awake.
 
-### `POST /api/console` **[live]** — Kommando ans Zielgerät
+### `POST /api/console` **[live]** — command to the target
 
-Body ist der rohe Text **ohne** Zeilenende, `?eol=cr|lf|crlf|none` bestimmt, was
-angehängt wird (Standard `cr`). Antwort `{"status":"sent","bytes":N}`.
+The body is the raw text **without** a line ending; `?eol=cr|lf|crlf|none` decides what gets
+appended (default `cr`). Response `{"status":"sent","bytes":N}`.
 
-Warum das wählbar ist: die OpenKNX-Konsole arbeitet zeichenweise — jeder Tastendruck
-wird sofort verarbeitet und zurückgeschrieben — während andere Firmware auf eine
-abgeschlossene Zeile wartet. Ein fest eingebautes Zeilenende würde den einen Fall
-kaputtmachen, um den anderen zu bedienen. Leerer Body mit `eol=cr` schickt nur das
-Zeilenende, was den Prompt neu zeichnen lässt.
+Why it is selectable: the OpenKNX console works character by character — every keystroke is
+processed and echoed immediately — while other firmware waits for a complete line. A
+hard-coded line ending would break one case in order to serve the other. An empty body with
+`eol=cr` sends just the line ending, which makes the prompt redraw.
 
-Die Bytes gehen denselben Weg wie die eines TCP-Clients auf Port 2323, laufen also in
-`bytesToTarget()` mit und erscheinen in `/api/status` unter `console.tx`. Mehr als
-512 Byte werden mit `413` abgelehnt — dieser Endpunkt ist für getippte Kommandos, nicht
-für Dateien.
+The bytes take the same path as those of a TCP client on port 2323, so they are counted in
+`bytesToTarget()` and appear in `/api/status` under `console.tx`. Anything longer than
+512 bytes is rejected with `413` — this endpoint is for typed commands, not for files.
 
-| Status | Bedeutung |
+| Status | Meaning |
 |---|---|
-| 200 | geschrieben |
-| 400 | `eol` unbekannt, oder nichts zu senden |
-| 409 | keine serielle Sitzung zum Ziel offen |
-| 413 | Kommando länger als 512 Byte |
-| 502 | Schreiben auf das Ziel fehlgeschlagen |
+| 200 | written |
+| 400 | unknown `eol`, or nothing to send |
+| 409 | no serial session to the target is open |
+| 413 | command longer than 512 bytes |
+| 502 | writing to the target failed |
 
-Am Gerät geprüft gegen einen OpenKNX-Fan-Aktor: `h` liefert die komplette Hilfe,
-`uptime` die Laufzeit — beides über die Web-Konsole eingegeben.
+Verified on hardware against an OpenKNX fan actuator: `h` returns the complete help,
+`uptime` the running time — both entered through the web console.
 
 ### `POST /api/bootsel` **[live]**
 
-Schickt ein laufendes RP2040-Ziel per 1200-Baud-Touch nach BOOTSEL, ohne etwas zu
-schreiben. Kein Body. Dasselbe, was `/api/flash` intern tut — nützlich, um den Touch zu
-prüfen, ohne die Firmware des Ziels zu überschreiben, und als Knopf im Web-UI.
+Pushes a running RP2040 target into BOOTSEL with a 1200-baud touch, without writing
+anything. No body. The same thing `/api/flash` does internally — useful for testing the
+touch without overwriting the target's firmware, and as a button in the web UI.
 
 ```json
 {"status":"bootsel","touched":true,"msc_kb":131071}
 ```
 
-`touched` ist `false`, wenn das Ziel schon im BOOTSEL stand und nichts zu tun war. Bei
-Misserfolg `409` mit demselben `error`-Text wie `/api/flash`.
+`touched` is `false` when the target already sat in BOOTSEL and there was nothing to do. On
+failure, `409` with the same `error` text as `/api/flash`.
 
-Zurück in die Anwendung kommt das Ziel danach durch einen Reset (RUN-Taster oder
-Aus/Ein) oder eben durch das nächste `POST /api/flash`. Der Flash-Inhalt bleibt vom
-Touch unberührt.
+The target returns to its application through a reset (RUN button or power cycle) or through
+the next `POST /api/flash`. The flash contents are untouched by the touch.
 
 ### `GET /api/snippet` **[live]**
 
-Die fertigen `platformio.ini`-Zeilen für das gerade angesteckte Ziel, als
-`text/plain`. Gedacht für Skripte und KI-Agenten: ein Aufruf genügt, um die passende
-Konfiguration zu bekommen, ohne die Ports und Baudraten selbst zu kennen.
+The ready-made `platformio.ini` lines for the currently attached target, as `text/plain`.
+Meant for scripts and AI agents: one call is enough to get the right configuration without
+knowing the ports and baud rates yourself.
 
 ```
 ; OpenKNX DebugProbe - openknx-probe-xxxx.local
@@ -263,16 +247,16 @@ upload_protocol = custom
 upload_command  = curl --fail-with-body --data-binary "@$BUILD_DIR/${PROGNAME}.uf2" http://openknx-probe-xxxx.local/api/flash
 ```
 
-Welcher Upload-Weg erscheint, hängt am erkannten Ziel: **VID `0x2E8A`** (RP2040) bekommt
-den UF2-Weg über `/api/flash`, alles andere `upload_port = rfc2217://…:4000` mit
-`upload_speed = 460800`. Ohne angestecktes Ziel bleiben nur die beiden
-Konsolenzeilen übrig, mit `; Ziel: kein Zielgeraet angesteckt` als Kommentar.
+Which upload path appears depends on the detected target: **VID `0x2E8A`** (RP2040) gets the
+UF2 path over `/api/flash`, everything else `upload_port = rfc2217://…:4000` with
+`upload_speed = 460800`. With no target attached only the two console lines remain, with
+`; Ziel: kein Zielgeraet angesteckt` as the comment.
 
-Dieselben Strings stehen unter `snippet` in `/api/status` und füllen im Web-UI die zwei
-Kopierfelder. Gebaut werden sie **in der Firmware** (`buildSnippet()` in `main.cpp`) —
-so können Endpunkt und Anzeige nicht auseinanderlaufen, wenn sich ein Port ändert.
+The same strings appear under `snippet` in `/api/status` and fill the two copy fields in the
+web UI. They are built **in the firmware** (`buildSnippet()` in `main.cpp`) — that way the
+endpoint and the display cannot drift apart when a port changes.
 
-## PlatformIO-Integration im Zielprojekt **[live]**
+## PlatformIO integration in the target project **[live]**
 
 ```ini
 [env:openknx_remote]
@@ -281,14 +265,14 @@ upload_protocol = custom
 upload_command  = curl --fail-with-body --data-binary "@$BUILD_DIR/${PROGNAME}.uf2" http://openknx-probe-xxxx.local/api/flash
 ```
 
-Vollständig kommentiert in `tools/platformio-snippet.ini`, dort auch die Variante mit
-`rfc2217://` für ESP32-Ziele.
+Fully commented in `tools/platformio-snippet.ini`, which also has the `rfc2217://` variant
+for ESP32 targets.
 
-Bequemer ist beides zu holen, statt es abzuschreiben — die Probe kennt ihren eigenen
-Namen und das angesteckte Ziel:
+More convenient than copying it by hand is fetching both — the probe knows its own name and
+the attached target:
 
 ```powershell
 curl.exe http://openknx-probe-xxxx.local/api/snippet
 ```
 
-Im Web-UI stehen dieselben Zeilen in zwei Kopierfeldern.
+The web UI shows the same lines in two copy fields.

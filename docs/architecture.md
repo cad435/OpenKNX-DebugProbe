@@ -72,17 +72,17 @@ Fehlerpfade:
 - Touch abgesetzt, aber kein MSC innerhalb 5 s -> ein Retry, danach `ERROR`. Am Endpunkt
   ist das ein `409` mit Begründung; vorher werden Baudrate und Steuerleitungen in den
   Konsolen-Ruhezustand zurückgestellt, damit ein gescheiterter Touch das Ziel nicht mit
-  1200 Baud und abgefallenem DTR zurücklässt. Der BOOTSEL/RUN-Pigtail ist verworfen
-  (Taster sitzen an der Frontblende), es bleibt also beim manuellen Griff ans Gerät.
+  1200 Baud und abgefallenem DTR zurücklässt. Danach bleibt der manuelle Griff ans Gerät:
+  BOOTSEL und RUN sitzen an der Frontblende.
 - `POST_FLASH` ohne CDC innerhalb 15 s -> `ERROR` mit Hinweis "Firmware startet nicht".
 
 ## Flash-Ablauf im Detail
 
-1. **Upload.** `POST /api/flash` puffert die UF2 im **PSRAM**. Eine Staging-Partition im
-   SPI-Flash war der ursprüngliche Plan und ist verworfen: bei 4 MB Flash ist für ~1,4 MB
-   UF2 kein Platz, die 2 MB PSRAM reichen dafür. Preis: der Puffer überlebt keinen Reboot,
-   ein Re-Flash braucht also einen neuen Upload. Beurteilt wird schon nach den ersten
-   512 Byte, **bevor** Speicher angefordert wird — siehe `Uf2Flasher::checkPrologue()`.
+1. **Upload.** `POST /api/flash` puffert die UF2 im **PSRAM**: im 4-MB-Flash der Probe
+   wäre für eine ~1,4-MB-UF2 kein Platz, die 2 MB PSRAM reichen dafür. Der Puffer
+   überlebt keinen Reboot, ein Re-Flash braucht also einen neuen Upload. Beurteilt wird
+   schon nach den ersten 512 Byte, **bevor** Speicher angefordert wird — siehe
+   `Uf2Flasher::checkPrologue()`.
 2. **Validierung.** Erst vollständig prüfen, dann handeln: Magic Start `0x0A324655` /
    `0x9E5D5157`, Magic End `0x0AB16F30`, Family-ID `0xe48bff56` (RP2040), `numBlocks`
    konsistent, Blockkette lückenlos. Schlägt das fehl, wird der Touch **nie** ausgelöst.

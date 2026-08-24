@@ -19,6 +19,7 @@
 #include "Rfc2217Server.hpp"
 #include "SerialBridge.hpp"
 #include "Settings.hpp"
+#include "StatusLed.hpp"
 #include "Uf2Flasher.hpp"
 #include "UsbTarget.hpp"
 #include "WebServer.hpp"
@@ -49,6 +50,42 @@ struct AppContext
     UsbTarget*    usb;
     SerialBridge*  bridge;
     Rfc2217Server* rfc2217;
+    StatusLed*     led;
+};
+
+/// Standardpin der RGB-LED auf den SuperMini-Varianten. Nur eine Vermutung —
+/// deshalb in NVS ueberschreibbar, siehe handleLed().
+constexpr int DEFAULT_LED_GPIO = 48;
+
+/// NVS-Schluessel fuer den gefundenen Pin.
+constexpr const char* KEY_LED_GPIO = "led_gpio";
+
+/**
+ * Solange ein solches Objekt lebt, blinkt die LED orange.
+ *
+ * RAII, weil handleFlash() ein halbes Dutzend Ausstiegspunkte hat. Ein
+ * vergessenes Zuruecksetzen liesse die Warnung "nicht abstecken" fuer immer
+ * stehen — und genau dann glaubt sie irgendwann niemand mehr.
+ */
+class FlashingIndicator
+{
+public:
+    explicit FlashingIndicator(StatusLed* led) : m_led(led)
+    {
+        if (m_led != nullptr) m_led->setMode(StatusLed::Mode::Flashing);
+    }
+    ~FlashingIndicator()
+    {
+        // Zurueck auf einen aus dem Zustand abgeleiteten Modus kuemmert sich
+        // die Aufsichtsschleife; hier genuegt es, die Warnung zu beenden.
+        if (m_led != nullptr) m_led->setMode(StatusLed::Mode::Idle);
+    }
+
+    FlashingIndicator(const FlashingIndicator&)            = delete;
+    FlashingIndicator& operator=(const FlashingIndicator&) = delete;
+
+private:
+    StatusLed* m_led;
 };
 
 AppContext g_ctx {};
@@ -262,6 +299,8 @@ esp_err_t handleStatus(httpd_req_t* req)
     json += "\"ssid\":" + jsonString(ctx->wifi->ssid()) + ",";
     json += "\"rssi\":" + std::to_string(ctx->wifi->rssi()) + ",";
     json += "\"ip\":" + jsonString(ctx->wifi->ip()) + ",";
+    json += "\"led\":{\"gpio\":" + std::to_string(static_cast<int>(ctx->led->pin())) +
+            ",\"mode\":" + jsonString(StatusLed::modeName(ctx->led->mode())) + "},";
     json += "\"radio_awake\":" +
             std::string(ctx->wifi->isRadioAwake() ? "true" : "false") + ",";
     json += "\"target\":" + targetJson(*ctx->usb) + ",";
@@ -395,6 +434,8 @@ esp_err_t handleFlash(httpd_req_t* req)
         }
     }
 
+    // Ab hier darf niemand das Kabel ziehen — die LED sagt es.
+    FlashingIndicator warn(ctx->led);
     ctx->bridge->note("Flashen gestartet");
 
     uint32_t        blocks = 0;
@@ -441,6 +482,43 @@ esp_err_t handleBootsel(httpd_req_t* req)
                            ctx->usb->mscSectorSize() / 1024);
     json += "}";
     return WebServer::sendJson(req, json);
+}
+
+/**
+ * Leitet den LED-Modus aus dem Betriebszustand ab.
+ *
+ * Reihenfolge ist die Dringlichkeit: `Flashing` setzt handleFlash() selbst und
+ * gewinnt gegen alles, weil dort ein Abziehen des Kabels Schaden anrichtet.
+ *
+ * Zu "Verbindung laeuft UND Funk wach": das ist bei dieser Firmware dieselbe
+ * Bedingung. Der Funk bleibt genau dann wach, wenn ein TCP-Client auf 2323
+ * oder 4000 haengt — siehe ClientActivity.hpp. Gelb heisst also "Client dran".
+ */
+void ledSupervisorTask(void* arg)
+{
+    auto* ctx = static_cast<AppContext*>(arg);
+
+    while (true)
+    {
+        if (ctx->led->mode() != StatusLed::Mode::Flashing)
+        {
+            StatusLed::Mode next = StatusLed::Mode::Idle;
+
+            // Reihenfolge = Dringlichkeit. BatteryLow fehlt hier bewusst:
+            // das Board hat keine Akkumessung, der Modus existiert schon,
+            // wird aber von nichts gesetzt (siehe CLAUDE.md, offener Punkt
+            // zum Teiler auf dem PCB).
+            if (ctx->wifi->state() != WiFiManager::State::Connected)
+                next = StatusLed::Mode::NoWifi;
+            else if (ctx->bridge->hasClient() || ctx->rfc2217->hasClient())
+                next = StatusLed::Mode::Busy;
+            else if (ctx->usb->state() == UsbTarget::State::Connected)
+                next = StatusLed::Mode::TargetReady;
+
+            ctx->led->setMode(next);
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
 }
 
 /**
@@ -545,6 +623,48 @@ esp_err_t handleConsoleSend(httpd_req_t* req)
 }
 
 /**
+ * POST /api/led?gpio=N — Pin der RGB-LED setzen und in NVS merken.
+ *
+ * Welcher Pin die LED traegt, unterscheidet sich zwischen den
+ * SuperMini-Varianten und steht in keinem Datenblatt, das vorliegt. Statt zu
+ * raten und neu zu flashen, laesst sich der Pin hier durchprobieren: setzen,
+ * hinschauen, und wenn es leuchtet, bleibt er gemerkt.
+ */
+esp_err_t handleLed(httpd_req_t* req)
+{
+    auto* ctx = static_cast<AppContext*>(req->user_ctx);
+
+    char query[48] = {};
+    char value[8]  = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "gpio", value, sizeof(value)) != ESP_OK)
+    {
+        return WebServer::sendStatus(req, "400 Bad Request",
+                                     R"({"error":"Parameter gpio fehlt"})");
+    }
+
+    const int gpio = atoi(value);
+    if (gpio < 0 || gpio > 48)
+    {
+        return WebServer::sendStatus(req, "400 Bad Request",
+                                     R"({"error":"gpio muss zwischen 0 und 48 liegen"})");
+    }
+
+    const esp_err_t err = ctx->led->setPin(static_cast<gpio_num_t>(gpio));
+    if (err != ESP_OK)
+    {
+        return WebServer::sendStatus(req, "500 Internal Server Error",
+                                     R"({"error":"LED liess sich auf diesem Pin nicht aufbauen"})");
+    }
+
+    ctx->settings->setU32(KEY_LED_GPIO, static_cast<uint32_t>(gpio));
+
+    return WebServer::sendJson(req, "{\"gpio\":" + std::to_string(gpio) +
+                                        ",\"mode\":\"" +
+                                        StatusLed::modeName(ctx->led->mode()) + "\"}");
+}
+
+/**
  * GET /api/snippet — die platformio.ini-Zeilen als reiner Text.
  *
  * Gedacht zum Abholen durch ein Werkzeug oder einen KI-Agenten: ein Aufruf, und
@@ -621,8 +741,20 @@ extern "C" void app_main(void)
     static UsbTarget    usb;
     static SerialBridge  bridge;
     static Rfc2217Server rfc2217;
+    static StatusLed     led;
 
     ESP_ERROR_CHECK(settings.begin());
+
+    // Die LED so frueh wie moeglich: sie ist die einzige Rueckmeldung, solange
+    // WLAN und Konsole noch nicht stehen.
+    const auto ledGpio = static_cast<gpio_num_t>(
+        settings.getU32(KEY_LED_GPIO, DEFAULT_LED_GPIO));
+    const esp_err_t ledErr = led.begin(ledGpio);
+    if (ledErr != ESP_OK)
+    {
+        ESP_LOGW(TAG, "status LED not available on GPIO%d: %s",
+                 static_cast<int>(ledGpio), esp_err_to_name(ledErr));
+    }
 
     ESP_LOGI(TAG, "OpenKNX DebugProbe %s (%s), running from '%s'",
              ota.version().c_str(), ota.buildTimestamp().c_str(), ota.runningPartition().c_str());
@@ -636,10 +768,11 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(web.begin(80));
 
-    g_ctx = AppContext{&settings, &wifi, &ota, &usb, &bridge, &rfc2217};
+    g_ctx = AppContext{&settings, &wifi, &ota, &usb, &bridge, &rfc2217, &led};
     ESP_ERROR_CHECK(web.on("/api/status", HTTP_GET, &handleStatus, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/flash", HTTP_POST, &handleFlash, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/bootsel", HTTP_POST, &handleBootsel, &g_ctx));
+    ESP_ERROR_CHECK(web.on("/api/led", HTTP_POST, &handleLed, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_POST, &handleConsoleSend, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_GET, &handleConsole, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/snippet", HTTP_GET, &handleSnippet, &g_ctx));
@@ -691,6 +824,12 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "control: rfc2217://%s.local:4000", wifi.hostname().c_str());
             }
         }
+    }
+
+    // Erst jetzt starten: der Task liest bridge und rfc2217.
+    if (led.isRunning())
+    {
+        xTaskCreatePinnedToCore(&ledSupervisorTask, "led_sup", 2560, &g_ctx, 2, nullptr, 0);
     }
 
     // Reaching a stable state — online or portal — counts as a healthy boot.

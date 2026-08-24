@@ -1,153 +1,172 @@
 # OpenKNX DebugProbe
 
-Mobiler WLAN-Debugger auf ESP32-S3, der ein OpenKNX-Gerät (RP2040 oder ESP32) über ein
-einziges USB-C-Kabel fernwartet: **Firmware-Update** und **serielle Konsole über TCP**.
+A portable WiFi debugger built on an ESP32-S3 that services an OpenKNX device (RP2040 or
+ESP32) through a **single USB-C cable**: **firmware updates** and a **serial console over
+TCP**.
 
-![Übersicht: PC über WLAN an die Probe, Probe über ein USB-C-Kabel ans OpenKNX-Gerät](docs/overview.png)
+![Overview: PC connects to the probe over WiFi, the probe connects to the OpenKNX device with one USB-C cable](docs/overview.png)
 
-## Warum
+## Why
 
-OpenKNX-REG1-Geräte sitzen im Schaltschrank. Firmware-Update und Debug-Konsole erfordern
-bisher einen Laptop vor Ort. Die Probe hängt am Gerät und wird über WLAN angesprochen.
+OpenKNX REG1 devices live inside a distribution cabinet. Until now, a firmware update or a
+look at the debug console meant carrying a laptop to the cabinet. The probe stays plugged
+into the device and is reached over WiFi.
 
-Die Probe ist gezielt für OpenKNX-Geräte entwickelt, gehört aber nicht zum OpenKNX-Projekt:
-ein privates Werkzeug, vorerst ohne Verbindung zur OpenKNX-Gruppe.
+It is built specifically for OpenKNX devices but is **not part of the OpenKNX project** — a
+private tool, for now with no affiliation to the OpenKNX group.
 
-## Stand
+## Status
 
-**Funktionsfähig und am Gerät verifiziert.** Der komplette Entwicklungszyklus läuft über
-WLAN:
+**Working and verified on real hardware.** The whole development cycle runs over WiFi:
 
 | | |
 |---|---|
-| WLAN-Einrichtung | Captive Portal, 3 Verbindungsversuche, dann Notfall-AP |
-| Selbst-Update | HTTP-OTA mit A/B-Slots und automatischem Rollback |
-| Zielgerät erkennen | RP2040, ESP32, STM32, CH34x/CP210x/FTDI — mit Seriennummer |
-| Konsole | `socket://…:2323` mit 16-KB-Mitschnitt, überlebt Resets des Ziels |
-| Steuerleitungen | `rfc2217://…:4000` mit Baudrate und DTR/RTS |
-| Firmware aufs Ziel | UF2 per HTTP, vollständig validiert, dann über USB-MSC geschrieben |
-| Weg nach BOOTSEL | 1200-Baud-Touch, von der Probe selbst abgesetzt — kein Tastendruck |
-| Kommandos ans Ziel | Eingabezeile im Browser, Zeilenende wählbar, Verlauf mit ↑/↓ |
-| Stromsparen | Funk dost, solange kein Client auf 2323 oder 4000 hängt |
-| Konsole im Browser | mitlesen ohne Terminal, Prompt und ANSI werden aufgelöst |
-| Konfiguration abholen | die fertigen `platformio.ini`-Zeilen als Kopierfeld und über `/api/snippet` |
+| WiFi setup | captive portal, 3 connection attempts, then a fallback AP |
+| Self-update | HTTP OTA with A/B slots and automatic rollback |
+| Target detection | RP2040, ESP32, STM32, CH34x/CP210x/FTDI — including serial number |
+| Console | `socket://…:2323` with a 16 KB backlog, survives target resets |
+| Control lines | `rfc2217://…:4000` with baud rate and DTR/RTS |
+| Firmware to the target | UF2 over HTTP, fully validated, then written over USB MSC |
+| Getting into BOOTSEL | 1200-baud touch, issued by the probe itself — no button press |
+| Commands to the target | input line in the browser, selectable line ending, history with ↑/↓ |
+| Power saving | the radio dozes while no client is attached to 2323 or 4000 |
+| Console in the browser | follow along without a terminal; prompt and ANSI are resolved |
+| Ready-made configuration | the `platformio.ini` lines as a copy field and via `/api/snippet` |
 
-Architektur, Hardware und Schnittstellen im Detail: **[docs/](docs/)**.
+Architecture, hardware and interfaces in detail: **[docs/](docs/)**.
 
-## Betriebsarten
+## Modes of operation
 
-- **Normalbetrieb:** `usb_host_cdc_acm` liest die Konsole des Ziels, ein TCP-Server auf
-  Port 2323 reicht sie an den PC weiter.
-- **Flashen:** 1200-Baud-Touch → Ziel rebootet nach BOOTSEL → `usb_host_msc` schreibt die
-  UF2 in rohen 512-Byte-Sektoren → Reset. Den Touch setzt `POST /api/flash` selbst ab,
-  **nachdem** die UF2 vollständig geprüft ist; am Gerät muss dafür niemand Taster drücken.
-  Bleibt der Massenspeicher aus, wird ein Versuch wiederholt, danach kommt ein `409` mit
-  Begründung — und die Konsole steht wieder auf 115200 mit Ruhepegel auf DTR/RTS.
+- **Normal operation:** `usb_host_cdc_acm` reads the target's console, a TCP server on port
+  2323 forwards it to the PC.
+- **Flashing:** 1200-baud touch → target reboots into BOOTSEL → `usb_host_msc` writes the
+  UF2 as raw 512-byte sectors → reset. `POST /api/flash` issues the touch itself, **after**
+  the UF2 has been fully validated; nobody has to press a button on the device. If the mass
+  storage device does not appear, one retry follows, then a `409` with a reason — and the
+  console is put back to 115200 with DTR/RTS at their idle levels.
 
-Der Funk spart Strom, wenn niemand zuhört: solange ein Client auf 2323 oder 4000 hängt,
-läuft er mit `WIFI_PS_NONE`, sonst dost er im `MIN_MODEM`. Der Konsolen-Livestream und das
-Flashen sind davon nachweislich nicht betroffen — der ESP32-S3 wird im Leerlauf aber
-deutlich kühler. Abstimmen darf nur ein akzeptierter TCP-Client: HTTP, das Web-UI und
-API-Aufrufe halten den Funk **nicht** wach. Ein offener Browser-Tab kostet also nichts,
-ein liegengelassenes `pio device monitor` schon. Der aktuelle Zustand steht als
-`radio_awake` in `/api/status` und als Zeile „Funk" im Web-UI.
+The radio saves power when nobody is listening: while a client is attached to 2323 or 4000
+it runs with `WIFI_PS_NONE`, otherwise it dozes in `MIN_MODEM`. The console livestream and
+flashing are demonstrably unaffected, while the ESP32-S3 runs noticeably cooler when idle.
+Only an accepted TCP client gets a vote: HTTP, the web UI and API calls do **not** keep the
+radio awake. So an open browser tab costs nothing, a forgotten `pio device monitor` does.
+The current state is reported as `radio_awake` in `/api/status` and as the "Funk" row in the
+web UI.
 
-Das Web-UI der Probe liest die Konsole nicht nur mit, sondern hat auch eine Zeile zum
-**Senden von Kommandos** ans Zielgerät. Das Zeilenende ist wählbar (CR, LF, CRLF, ohne),
-weil die OpenKNX-Konsole zeichenweise arbeitet und andere Firmware auf eine ganze Zeile
-wartet. ↑/↓ blättert durch die zuletzt gesendeten Kommandos.
+The web UI does not only follow the console, it also has a line for **sending commands** to
+the target. The line ending is selectable (CR, LF, CRLF, none), because the OpenKNX console
+works character by character while other firmware waits for a complete line. ↑/↓ steps
+through recently sent commands.
 
-Am PC ist keine zusätzliche Hardware nötig — ein paar Zeilen in der `platformio.ini` des
-Zielprojekts genügen. Die passenden liefert die Probe selbst, denn sie kennt ihren eigenen
-Namen und weiß, was angesteckt ist:
+## Status LED
+
+The module's RGB LED (WS2812 on GPIO48) shows the operating state. Highest urgency wins —
+`flashing` beats everything, because pulling the cable there does real damage.
+
+| State | LED | Trigger |
+|---|---|---|
+| `flashing` | orange, blinking at 320 ms | `POST /api/flash` is writing — **do not unplug** |
+| `battery_low` | red, blinking at 1 s | cell nearly empty — **not implemented yet**, see below |
+| `no_wifi` | red, pulsing | not connected to WiFi, including portal mode |
+| `busy` | solid yellow | a client is attached to 2323 or 4000 |
+| `target_ready` | solid green | a target is detected |
+| `idle` | green, pulsing | ready, no target attached |
+
+
+Brightness is capped well below maximum. A WS2812 at full white draws around 60 mA, which
+matters on battery.
+
+No extra hardware is needed on the PC side — a few lines in the target project's
+`platformio.ini` are enough. The probe hands them out itself, since it knows its own name
+and what is plugged in:
 
 ```powershell
 curl.exe http://openknx-probe-xxxx.local/api/snippet
 ```
 
-Im Web-UI stehen dieselben Zeilen in zwei Kopierfeldern, sobald ein Ziel erkannt ist. Wer
-sie lieber selbst schreibt:
+The web UI shows the same lines in two copy fields as soon as a target is detected. If you
+would rather write them yourself:
 
 ```ini
-; RP2040-Ziel (UF2 über HTTP)
+; RP2040 target (UF2 over HTTP)
 monitor_port    = socket://openknx-probe-xxxx.local:2323
 upload_protocol = custom
 upload_command  = curl --fail-with-body --data-binary "@$BUILD_DIR/${PROGNAME}.uf2" http://openknx-probe-xxxx.local/api/flash
 
-; ESP32-Ziel (esptool über RFC2217)
+; ESP32 target (esptool over RFC2217)
 upload_port     = rfc2217://openknx-probe-xxxx.local:4000
 upload_speed    = 460800
 ```
 
-Vollständig kommentiert in [tools/platformio-snippet.ini](tools/platformio-snippet.ini).
+Fully commented in [tools/platformio-snippet.ini](tools/platformio-snippet.ini).
 
-## Bauen und flashen
+## Build and flash
 
 ```powershell
 cd firmware
-pio run              # bauen
-pio run -t upload    # flashen (Port wird selbst gesucht)
+pio run              # build
+pio run -t upload    # flash (the port is detected automatically)
 ```
 
-PlatformIO mit `framework = espidf`, Plattform espressif32 54.3.21 (ESP-IDF 5.4.2).
-Ein separates ESP-IDF-Setup ist nicht nötig.
+PlatformIO with `framework = espidf`, platform espressif32 54.3.21 (ESP-IDF 5.4.2). A
+separate ESP-IDF installation is not required.
 
-## Erstinbetriebnahme
+## First-time setup
 
-1. Flashen. Die Probe findet keine Zugangsdaten und öffnet ein offenes WLAN
+1. Flash the firmware. The probe finds no credentials and opens an open WiFi network
    `openknx-probe-<mac>`.
-2. Damit verbinden — das Captive Portal öffnet sich von selbst, sonst
-   `http://192.168.4.1/`.
-3. Netzwerk auswählen, Passwort eingeben, optional einen eigenen Gerätenamen vergeben
-   (wichtig, wenn mehrere Probes im Einsatz sind).
-4. Nach dem Neustart ist die Probe unter `http://<name>.local/` erreichbar.
+2. Connect to it — the captive portal opens by itself, otherwise `http://192.168.4.1/`.
+3. Pick a network, enter the password, optionally assign your own device name (important
+   when several probes are in use).
+4. After the restart the probe is reachable at `http://<name>.local/`.
 
-## Selbst-Update
+## Self-update
 
-Im Browser über die Startseite, oder:
+From the browser via the start page, or:
 
 ```powershell
 curl.exe --fail-with-body --data-binary "@firmware/.pio/build/probe/firmware.bin" `
          http://openknx-probe-xxxx.local/api/update
 ```
 
-Ein fremdes oder beschädigtes Image wird mit HTTP 400 abgelehnt, bevor irgendetwas
-geschrieben wird. Startet ein neues Image nicht sauber durch, fällt der Bootloader
-automatisch auf das vorherige zurück.
+A foreign or damaged image is rejected with HTTP 400 before anything is written. If a new
+image does not boot cleanly, the bootloader falls back to the previous one automatically.
 
-## Sicherheit
+## Security
 
-Die Probe hat **keine Authentifizierung**. Wer sie im Netz erreicht, kann ohne weitere
-Hürde
+The probe has **no authentication**. Anyone who can reach it on the network can, with no
+further hurdle,
 
-- Firmware ins angesteckte Zielgerät schreiben (`POST /api/flash`),
-- die Probe selbst per OTA überschreiben (`POST /api/update`),
-- Kommandos an die Konsole des Ziels schicken (`POST /api/console`),
-- das Ziel nach BOOTSEL schicken (`POST /api/bootsel`) und
-- die gespeicherten WLAN-Zugangsdaten löschen (`POST /api/wifi/forget`).
+- write firmware into the attached target (`POST /api/flash`),
+- overwrite the probe itself over OTA (`POST /api/update`),
+- send commands to the target's console (`POST /api/console`),
+- push the target into BOOTSEL (`POST /api/bootsel`), and
+- erase the stored WiFi credentials (`POST /api/wifi/forget`).
 
-Auch der Einrichtungs-AP ist **offen**, ohne WPA — während der Erstinbetriebnahme kann in
-Funkreichweite jeder die Zugangsdaten setzen.
+The setup AP is **open** as well, without WPA — during first-time setup anyone within radio
+range can set the credentials.
 
-Das ist Absicht: die Probe ist ein Werkzeug für den Werktisch und das eigene
-Entwicklungsnetz, wo die Rundenzeit zählt und ein Login bei jedem Flash nur im Weg stünde.
-Daraus folgt aber, wohin sie **nicht** gehört: nicht ins Gäste-WLAN, nicht in ein Netz mit
-fremden Teilnehmern, und keinesfalls hinter eine Portfreigabe oder einen Reverse-Proxy aus
-dem Internet. Bleibt sie dauerhaft im Schaltschrank, gehört sie in dasselbe
-vertrauenswürdige Netz wie die Geräte, die sie flashen darf — denn genau das kann jeder,
-der sie erreicht.
+This is deliberate: the probe is a tool for the bench and your own development network,
+where turnaround time matters and a login on every flash would only get in the way. But it
+follows where it does **not** belong: not on a guest network, not on a network with
+strangers on it, and never behind a port forward or a reverse proxy exposed to the
+internet. If it stays in the cabinet permanently, it belongs on the same trusted network as
+the devices it is allowed to flash — because that is exactly what anyone who reaches it can
+do.
 
-## Dokumentation
+## Documentation
 
-| Datei | Inhalt |
+| File | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Zustandsmaschine, Tasks, Core-Aufteilung |
-| [docs/hardware.md](docs/hardware.md) | Probe-Modul, VBUS, Dongle-Konzept |
-| [docs/protocol.md](docs/protocol.md) | HTTP-API und TCP-Serial-Schnittstelle |
+| [docs/architecture.md](docs/architecture.md) | state machine, tasks, core split |
+| [hardware/hardware.md](hardware/hardware.md) | probe module, power supply, battery, VBUS |
+| [docs/protocol.md](docs/protocol.md) | HTTP API and TCP serial interface |
 
-## Lizenz
+`docs/architecture.md` is currently German only.
 
-[GNU General Public License v3.0 oder später](LICENSE) (`GPL-3.0-or-later`).
+## License
 
-Die USB-Host- und mDNS-Komponenten von Espressif, die der Build über den Component Manager
-nachlädt, stehen unter Apache-2.0 und liegen nicht in diesem Repo.
+[GNU General Public License v3.0 or later](LICENSE) (`GPL-3.0-or-later`).
+
+Espressif's USB host and mDNS components, which the build pulls in through the Component
+Manager, are Apache-2.0 licensed and are not part of this repository.
