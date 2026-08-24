@@ -66,15 +66,27 @@ The module's RGB LED (WS2812 on GPIO48) shows the operating state. Highest urgen
 | State | LED | Trigger |
 |---|---|---|
 | `flashing` | orange, blinking at 320 ms | `POST /api/flash` is writing — **do not unplug** |
-| `battery_low` | red, blinking at 1 s | cell nearly empty — **not implemented yet**, see below |
+| `battery_low` | red, blinking at 1 s | cell nearly empty — **not implemented yet** |
 | `no_wifi` | red, pulsing | not connected to WiFi, including portal mode |
 | `busy` | solid yellow | a client is attached to 2323 or 4000 |
 | `target_ready` | solid green | a target is detected |
 | `idle` | green, pulsing | ready, no target attached |
 
 
+`battery_low` exists as a mode and renders, but nothing sets it yet: reading the cell
+voltage needs the divider on the PCB, which is not built. The current mode is reported as
+`led.mode` in `/api/status`.
+
 Brightness is capped well below maximum. A WS2812 at full white draws around 60 mA, which
 matters on battery.
+
+Two more LEDs sit on the SuperMini. They are wired in hardware, the firmware does not
+control them:
+
+| LED | Meaning |
+|---|---|
+| red | solid while the board is powered **externally** — from the bus or from USB. It stays dark when the probe runs on the battery alone, so it tells you which source is feeding the board. |
+| blue | the Li-ion charger: on while charging, off once the cell is full, blinking when no cell is connected. |
 
 ## PlatformIO integration
 
