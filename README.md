@@ -161,7 +161,7 @@ do.
 | File | Contents |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | state machine, tasks, core split |
-| [hardware/hardware.md](hardware/hardware.md) | probe module, power supply, battery, VBUS |
+| [hardware/](hardware/) | probe module, power supply, battery, VBUS |
 | [docs/protocol.md](docs/protocol.md) | HTTP API and TCP serial interface |
 
 `docs/architecture.md` is currently German only.

@@ -9,7 +9,7 @@
 | `usb_target` | **implementiert** | USB-Host: Enumeration, Identifikation, CDC/VCP-Sitzung, MSC, 1200-Baud-Touch nach BOOTSEL |
 | `serial_bridge` | **implementiert** | TCP 2323 ⟷ CDC des Ziels mit Ringpuffer, dazu RFC2217 auf 4000 |
 | `uf2_flasher` | **implementiert** | UF2 vollständig validieren, dann als rohe 512-Byte-Sektoren schreiben |
-| `target_power` | Stub | VBUS-Load-Switch, Strommessung — optional, siehe `hardware/hardware.md` |
+| `target_power` | Stub | VBUS-Load-Switch, Strommessung — optional, siehe `hardware/README.md` |
 
 Geschrieben wird **ohne Dateisystem**: das RP2040-Boot-ROM durchsucht jeden eingehenden
 Sektor nach dem UF2-Magic und ignoriert die FAT-Struktur des `RPI-RP2`-Volumes. FatFs auf

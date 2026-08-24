@@ -161,7 +161,7 @@ The endpoint establishes BOOTSEL mode itself (1200-baud touch, see above) — **
 target's firmware still enumerates**. Only when it no longer does, somebody has to step in:
 BOOTSEL and RUN are accessible from the front panel, and the probe detects the state change
 by itself. A power cycle over VBUS explicitly does not help there, because all OpenKNX
-devices are KNX bus powered — see [hardware.md](../hardware/hardware.md).
+devices are KNX bus powered — see [hardware/](../hardware/).
 
 ### `GET /api/console?cursor=N` **[live]**
 
