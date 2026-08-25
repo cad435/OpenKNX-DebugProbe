@@ -152,6 +152,11 @@ void StatusLed::run()
     {
         if (m_reopen.exchange(false))
         {
+            // Den alten Strip erst dunkel schalten. Ein WS2812 ist ein Latch:
+            // ohne neue Daten haelt er seine letzte Farbe unbegrenzt. Wer den
+            // Pin umlegt, liesse sonst eine LED auf ihrer letzten Farbe
+            // einfrieren, bis das Board stromlos wird.
+            write(0, 0, 0);
             openStrip(m_pin);
             phase = 0;
         }
