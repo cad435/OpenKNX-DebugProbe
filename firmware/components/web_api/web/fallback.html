@@ -1,0 +1,31 @@
+<!-- Eingebaute Notfallseite. Wird nur ausgeliefert, wenn im LittleFS keine
+     index.html liegt. Bewusst winzig und ohne externe Abhaengigkeiten: sie ist
+     das letzte, was die Probe noch anzeigen kann. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenKNX DebugProbe</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 44em; margin: 3em auto;
+         padding: 0 1.2em; color: #222; background: #fafafa; }
+  code, pre { background: #eee; border-radius: 4px; }
+  code { padding: .1em .35em; }
+  pre  { padding: .8em; overflow-x: auto; }
+  .warn { border-left: 4px solid #d08000; padding-left: 1em; }
+</style>
+
+<h1>OpenKNX DebugProbe</h1>
+
+<div class="warn">
+  <p><strong>Die Web-Oberflaeche fehlt.</strong> Die Firmware laeuft, aber in der
+  LittleFS-Partition <code>storage</code> liegt keine <code>index.html</code>.</p>
+</div>
+
+<p>Das ist der erwartete Zustand nach einem frischen Flash oder nach dem Wechsel
+der Partition von SPIFFS auf LittleFS. Die Assets werden getrennt von der
+Firmware geschrieben:</p>
+
+<pre>pio run -t buildfs
+pio run -t uploadfs</pre>
+
+<p>Die API ist davon unabhaengig und funktioniert bereits:
+<a href="/api/status">/api/status</a></p>

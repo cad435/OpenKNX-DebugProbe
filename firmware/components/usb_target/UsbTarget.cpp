@@ -28,6 +28,62 @@ constexpr uint16_t ANY_PID = 0xFFFF;
 /// VID von Raspberry Pi. Nur diese Geraete kennen den 1200-Baud-Touch.
 constexpr uint16_t VID_RASPBERRY = 0x2E8A;
 
+/// VID von Espressif. Deren Chips mit nativem USB werten DTR und RTS im
+/// USB-Serial-JTAG selbst aus, brauchen aber eine andere Folge als die
+/// Transistorschaltung auf den Bridge-Boards.
+constexpr uint16_t VID_ESPRESSIF = 0x303A;
+
+/// Wie lange EN beim Reset unten bleibt (esptool: 100 ms).
+constexpr uint32_t RESET_HOLD_MS = 100;
+
+/// Wie lange IO0 nach dem Loslassen von EN noch unten bleibt, damit der Chip
+/// den Pegel beim Hochlaufen sicher abtastet (esptool: 50 ms).
+constexpr uint32_t BOOT_HOLD_MS = 50;
+
+/// Schrittweite der USB-Serial-JTAG-Folge (esptool: 100 ms je Schritt).
+constexpr uint32_t JTAG_STEP_MS = 100;
+
+/// Der USB-Serial-JTAG haengt am selben Kabel wie die Daten: nach einem Reset
+/// muss sich der Port erst neu melden. esptool wartet hier 200 ms.
+constexpr uint32_t JTAG_SETTLE_MS = 200;
+
+/*
+ * PICOBOOT — das Vendor-Interface des RP2040-Boot-ROMs. Werte aus
+ * `boot/picoboot.h` des pico-sdk, nicht aus dem Gedaechtnis:
+ * Magic, Control-Request zum Ruecksetzen des Interface, Kommando-ID, und die
+ * Feldoffsets des 32 Byte grossen Kommandopakets.
+ */
+constexpr uint32_t PICOBOOT_MAGIC    = 0x431FD10Bu;
+constexpr uint8_t  PICOBOOT_IF_RESET = 0x41;  ///< Control OUT, wLength 0
+constexpr uint8_t  PC_REBOOT         = 0x02;
+constexpr size_t   PICOBOOT_CMD_LEN  = 32;
+
+/// Vorlauf, den das Boot-ROM vor dem Neustart wartet. Lang genug, dass die
+/// Quittung noch durchkommt, kurz genug, dass es sich sofort anfuehlt.
+constexpr uint32_t PICOBOOT_DELAY_MS = 100;
+
+/// Geduld fuer einen einzelnen PICOBOOT-Transfer.
+constexpr uint32_t PICOBOOT_TIMEOUT_MS = 1000;
+
+/*
+ * HID-Klassenrequests (USB HID 1.11, 7.2). Feature-Reports laufen als
+ * Steuertransfer ueber Endpunkt 0 — dafuer braucht es keinen HID-Treiber.
+ */
+constexpr uint8_t  HID_REQ_GET_REPORT = 0x01;
+constexpr uint16_t HID_REPORT_FEATURE = 0x03;
+
+/// VID von pid.codes. Der rv003usb-Bootloader meldet sich darunter.
+constexpr uint16_t VID_PIDCODES     = 0x1209;
+constexpr uint16_t PID_RV003USB_BL  = 0xB003;
+
+void put32(uint8_t* p, uint32_t v)
+{
+    p[0] = static_cast<uint8_t>(v);
+    p[1] = static_cast<uint8_t>(v >> 8);
+    p[2] = static_cast<uint8_t>(v >> 16);
+    p[3] = static_cast<uint8_t>(v >> 24);
+}
+
 /// Wie lange DTR beim Touch aktiv bleibt, bevor es wieder abfaellt.
 constexpr uint32_t TOUCH_HOLD_MS = 50;
 
@@ -87,6 +143,11 @@ constexpr KnownDevice KNOWN_DEVICES[] = {
 
     // --- sonstige, die im OpenKNX-Umfeld auftauchen können -----------------
     {0x0483, 0x5740, "STM32 Virtual COM Port",        UsbTarget::Kind::Cdc,          UsbTarget::Driver::CdcAcm},
+
+    // CH32V003 mit cnlohrs rv003usb-Bootloader. Der Chip hat keine
+    // USB-Peripherie — das ist bitgebangtes Low-Speed-USB in Software.
+    {0x1209, 0xB003, "CH32V003 im rv003usb-HID-Bootloader",
+                                                      UsbTarget::Kind::HidBootloader, UsbTarget::Driver::HidRaw},
 };
 
 /// USB-Stringdescriptoren sind UTF-16LE; für die Anzeige reicht ASCII.
@@ -136,6 +197,7 @@ const char* UsbTarget::kindName(Kind kind)
         case Kind::Bootsel:      return "bootsel";
         case Kind::Msc:          return "msc";
         case Kind::Hid:          return "hid";
+        case Kind::HidBootloader: return "hid_bootloader";
         case Kind::Hub:          return "hub";
         case Kind::Unknown:      break;
     }
@@ -152,6 +214,7 @@ const char* UsbTarget::driverName(Driver driver)
         case Driver::Cp210x:      return "cp210x";
         case Driver::Ftdi:        return "ftdi";
         case Driver::Pl2303:      return "pl2303";
+        case Driver::HidRaw:      return "hid_raw";
         case Driver::Unsupported: return "unsupported";
         case Driver::None:        break;
     }
@@ -547,6 +610,638 @@ esp_err_t UsbTarget::enterBootsel(std::string& error)
     return ESP_ERR_TIMEOUT;
 }
 
+// ---------------------------------------------------------------------------
+// Neustart des Ziels
+// ---------------------------------------------------------------------------
+
+UsbTarget::ResetSupport UsbTarget::resetSupport(ResetMode mode) const
+{
+    ResetSupport out;
+
+    if (state() != State::Connected)
+    {
+        out.how = "kein Zielgeraet angesteckt";
+        return out;
+    }
+
+    const DeviceInfo info = device();
+
+    /*
+     * Ziel steht im BOOTSEL: es meldet sich als Massenspeicher, eine serielle
+     * Sitzung gibt es dann nicht. In den Bootmodus muss es niemand mehr
+     * schicken; zurueck in die Anwendung fuehrt ueber USB aber auch kein Weg,
+     * denn das Boot-ROM startet erst nach einem vollstaendigen UF2 neu.
+     */
+    if (isMscReady() || info.kind == Kind::Bootsel || info.kind == Kind::Msc)
+    {
+        if (mode == ResetMode::Bootloader)
+        {
+            out.possible = true;
+            out.how      = "Ziel steht bereits im BOOTSEL";
+            return out;
+        }
+        if (m_picobootIntf != PICOBOOT_NO_INTF)
+        {
+            out.possible = true;
+            out.how      = "PICOBOOT-Reboot ueber das Vendor-Interface des Boot-ROMs";
+            return out;
+        }
+
+        out.how = "Ziel steht im BOOTSEL und bietet kein PICOBOOT-Interface an - entweder "
+                  "ein UF2 schreiben oder am Geraet RUN druecken.";
+        return out;
+    }
+
+    /*
+     * Die Pruefung auf eine offene serielle Sitzung gehoert NUR zu den
+     * CDC-Wegen. Sie stand hier einmal davor und hat damit die HID-Zweige
+     * blockiert: ein HID-Geraet hat nie eine serielle Sitzung, und der
+     * rv003usb-Bootmodus laeuft ueber Endpunkt 0.
+     */
+    switch (info.kind)
+    {
+        case Kind::SerialBridge:
+            if (!isSerialOpen())
+            {
+                out.how = "keine serielle Sitzung zum Ziel offen";
+                return out;
+            }
+            out.possible = true;
+            out.how      = (mode == ResetMode::Run)
+                               ? "RTS-Puls auf EN (esptool-Hard-Reset)"
+                               : "DTR/RTS-Folge auf IO0 und EN (esptool-Bootloader-Reset)";
+            return out;
+
+        case Kind::Cdc:
+            if (!isSerialOpen())
+            {
+                out.how = "keine serielle Sitzung zum Ziel offen";
+                return out;
+            }
+            if (info.vid == VID_ESPRESSIF)
+            {
+                out.possible = true;
+                out.how      = (mode == ResetMode::Run)
+                                   ? "RTS-Puls ueber den USB-Serial-JTAG"
+                                   : "DTR/RTS-Folge ueber den USB-Serial-JTAG";
+                return out;
+            }
+            if (info.vid == VID_RASPBERRY)
+            {
+                if (mode == ResetMode::Bootloader)
+                {
+                    out.possible = true;
+                    out.how      = "1200-Baud-Touch";
+                    return out;
+                }
+                /*
+                 * Kein Versehen, sondern die Hardware: bei nativem USB gibt es
+                 * keine Leitung am Kabel, die den RP2040 zuruecksetzt. DTR und
+                 * RTS landen in der Firmware des Ziels, nicht an RUN.
+                 */
+                out.how = "Ein RP2040 mit nativem USB hat keine Reset-Leitung am Kabel, "
+                          "und PICOBOOT gibt es nur im Boot-ROM. Aus der Ferne geht es "
+                          "trotzdem: erst in den Bootmodus, dann neu starten - der Weg "
+                          "fuehrt dann durchs Boot-ROM. Sonst: Konsole des Ziels, ein "
+                          "neues UF2, oder der RUN-Taster.";
+                return out;
+            }
+            out.how = "Unbekanntes CDC-Geraet: wie dessen Reset beschaltet ist, weiss die "
+                      "Probe nicht - ein DTR/RTS-Puls waere geraten.";
+            return out;
+
+        case Kind::HidBootloader:
+            /*
+             * Steht schon im Bootloader. Zurueck in die Anwendung fuehrt nur
+             * der Weg ueber minichlink: dieser Bootloader kennt kein
+             * "boot"-Kommando, sondern nur "fuehre diesen Scratchpad aus" —
+             * der Code dafuer kommt vom Werkzeug, nicht von der Probe.
+             */
+            if (mode == ResetMode::Bootloader)
+            {
+                out.possible = true;
+                out.how      = "Ziel steht bereits im rv003usb-Bootloader";
+                return out;
+            }
+            out.how = "Ziel steht im rv003usb-Bootloader. Zurueck in die Anwendung kommt "
+                      "es ueber minichlink - der Bootloader fuehrt nur hochgeladenen Code "
+                      "aus und kennt kein eigenes Boot-Kommando.";
+            return out;
+
+        case Kind::Hid:
+            if (mode == ResetMode::Bootloader && m_hidIntf != PICOBOOT_NO_INTF)
+            {
+                /*
+                 * Konvention des rv003usb-Bootloaders, keine USB-Norm. Ein
+                 * Ziel, das die Report-ID nicht kennt, quittiert mit einem
+                 * Stall — das ist harmlos und wird als Absage gemeldet.
+                 * Deshalb wird der Versuch angeboten, statt ihn an eine
+                 * PID-Liste zu binden, die nie vollstaendig waere.
+                 */
+                out.possible = true;
+                out.how      = "HID-Feature-Report 0xAB (rv003usb-Konvention)";
+                return out;
+            }
+            out.how = (mode == ResetMode::Run)
+                          ? "Ein HID-Geraet hat keine Reset-Leitung am Kabel."
+                          : "kein HID-Interface am Ziel gefunden";
+            return out;
+
+        default:
+            out.how = std::string("Geraeteart '") + kindName(info.kind) +
+                      "' kennt keinen Neustart ueber USB.";
+            return out;
+    }
+}
+
+esp_err_t UsbTarget::bridgeReset(ResetMode mode)
+{
+    /*
+     * Beschaltung wie auf jedem ESP32-Board mit Bridge-Chip: RTS an EN, DTR an
+     * IO0, beide ueber ein Transistorpaar, das bei zwei gleichzeitig aktiven
+     * Leitungen absichtlich gar nichts tut.
+     *
+     * Wir setzen beide Bits in einem einzigen Steuertransfer. Der
+     * Zwischenzustand, ueber den pyserial hier stolpert - eine Leitung nach der
+     * anderen, rund 50 ms auseinander, siehe CLAUDE.md zu RFC2217 - entsteht
+     * dabei gar nicht erst.
+     */
+    esp_err_t err = setControlLines(false, true);  // EN low: Ziel im Reset
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(RESET_HOLD_MS));
+
+    if (mode == ResetMode::Bootloader)
+    {
+        err = setControlLines(true, false);  // EN frei, IO0 noch low
+        if (err != ESP_OK) return err;
+        vTaskDelay(pdMS_TO_TICKS(BOOT_HOLD_MS));
+    }
+
+    return setControlLines(false, false);
+}
+
+esp_err_t UsbTarget::jtagReset(ResetMode mode)
+{
+    /*
+     * USB-Serial-JTAG der ESP32-C- und -S-Reihe. Hier werten nicht Transistoren
+     * die Steuerleitungen aus, sondern der Chip selbst — und er baut dabei den
+     * Interlock der Devkit-Schaltung nach. Am Geraet gemessen (ESP32-C3,
+     * 2026-09-12):
+     *
+     *     DTR inaktiv + RTS-Puls  -> Chip resettet (rst:0x15 USB_UART_CHIP_RESET)
+     *     DTR aktiv   + RTS-Puls  -> gar nichts, keine Neuanmeldung
+     *
+     * Beide Leitungen gleichzeitig aktiv sind also wirkungslos, damit ein
+     * Terminal nicht versehentlich resettet.
+     *
+     * Der Download-Modus kommt deshalb nicht aus dem Pegel im Moment des
+     * Loslassens, sondern aus einem **Latch**: eine Phase mit aktivem DTR
+     * merkt sich der Chip, und beim naechsten Reset bootet er in den
+     * Download-Modus. Genau darum hat esptool fuer diese Chips eine eigene
+     * Folge (USBJTAGSerialReset) und geht dabei bewusst NICHT ueber (0,0) —
+     * das wuerde den Latch wieder loeschen.
+     *
+     * Und genau da lag der Fehler: die Konsole laesst DTR bei CDC absichtlich
+     * aktiv (resetControlLines(), damit arduino-pico seine Ausgabe nicht
+     * zurueckhaelt). Der Ausgangszustand ist also (DTR aktiv, RTS inaktiv) —
+     * ein Reset von dort aus ist fuer den Chip eine Download-Anforderung. Ein
+     * Neustart in die Anwendung muss den Latch erst loeschen.
+     */
+    esp_err_t err = setControlLines(false, false);  // Latch loeschen
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(JTAG_STEP_MS));
+
+    if (mode == ResetMode::Bootloader)
+    {
+        // DTR allein aktiv: GPIO9 wird gelatcht.
+        err = setControlLines(true, false);
+        if (err != ESP_OK) return err;
+        vTaskDelay(pdMS_TO_TICKS(JTAG_STEP_MS));
+
+        /*
+         * Beide Bits in einem Transfer: der Uebergang beruehrt weder (1,1) noch
+         * (0,0). Das erste waere wirkungslos, das zweite wuerde den Latch
+         * loeschen — pyserial stolpert genau hier, weil es Leitung fuer Leitung
+         * quittiert (siehe CLAUDE.md zu RFC2217).
+         */
+        err = setControlLines(false, true);
+        if (err != ESP_OK) return err;
+        vTaskDelay(pdMS_TO_TICKS(JTAG_STEP_MS));
+    }
+    else
+    {
+        // Kein DTR dazwischen — der Latch bleibt leer, der Chip bootet normal.
+        err = setControlLines(false, true);
+        if (err != ESP_OK) return err;
+        vTaskDelay(pdMS_TO_TICKS(JTAG_STEP_MS));
+    }
+
+    err = setControlLines(false, false);  // Reset loslassen
+    if (err != ESP_OK) return err;
+
+    // Der Port meldet sich nach dem Reset neu; esptool wartet hier genauso.
+    vTaskDelay(pdMS_TO_TICKS(JTAG_SETTLE_MS));
+    return ESP_OK;
+}
+
+void UsbTarget::picobootXferCb(usb_transfer_t* xfer)
+{
+    // Laeuft im clientTask (dort wird usb_host_client_handle_events gepumpt).
+    auto sem = static_cast<SemaphoreHandle_t>(xfer->context);
+    if (sem != nullptr) xSemaphoreGive(sem);
+}
+
+void UsbTarget::findPicoboot(usb_device_handle_t handle)
+{
+    m_picobootIntf  = PICOBOOT_NO_INTF;
+    m_picobootEpOut = 0;
+    m_picobootEpIn  = 0;
+
+    const usb_config_desc_t* cfg = nullptr;
+    if (usb_host_get_active_config_descriptor(handle, &cfg) != ESP_OK || cfg == nullptr) return;
+
+    for (uint8_t n = 0; n < cfg->bNumInterfaces; ++n)
+    {
+        int                    offset = 0;
+        const usb_intf_desc_t* intf   = usb_parse_interface_descriptor(cfg, n, 0, &offset);
+        if (intf == nullptr) continue;
+
+        // PICOBOOT meldet sich als Vendor-spezifisch ohne Subklasse/Protokoll.
+        // Der Massenspeicher daneben ist 0x08 und faellt hier heraus.
+        if (intf->bInterfaceClass != USB_CLASS_VENDOR_) continue;
+        if (intf->bInterfaceSubClass != 0 || intf->bInterfaceProtocol != 0) continue;
+
+        uint8_t epOut = 0;
+        uint8_t epIn  = 0;
+
+        for (int e = 0; e < intf->bNumEndpoints; ++e)
+        {
+            // Der Offset muss je Endpunkt wieder am Interface starten.
+            int                  epOffset = offset;
+            const usb_ep_desc_t* ep =
+                usb_parse_endpoint_descriptor_by_index(intf, e, cfg->wTotalLength, &epOffset);
+            if (ep == nullptr) continue;
+            if ((ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) !=
+                USB_BM_ATTRIBUTES_XFER_BULK)
+                continue;
+
+            if ((ep->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK) != 0)
+                epIn = ep->bEndpointAddress;
+            else
+                epOut = ep->bEndpointAddress;
+        }
+
+        if (epOut == 0) continue;  // ohne OUT nichts zu senden
+
+        m_picobootIntf  = intf->bInterfaceNumber;
+        m_picobootEpOut = epOut;
+        m_picobootEpIn  = epIn;
+
+        ESP_LOGI(TAG, "  PICOBOOT auf Interface %u (out 0x%02X, in 0x%02X)",
+                 m_picobootIntf, m_picobootEpOut, m_picobootEpIn);
+        return;
+    }
+}
+
+void UsbTarget::findHid(usb_device_handle_t handle)
+{
+    m_hidIntf = PICOBOOT_NO_INTF;
+
+    const usb_config_desc_t* cfg = nullptr;
+    if (usb_host_get_active_config_descriptor(handle, &cfg) != ESP_OK || cfg == nullptr) return;
+
+    for (uint8_t n = 0; n < cfg->bNumInterfaces; ++n)
+    {
+        int                    offset = 0;
+        const usb_intf_desc_t* intf   = usb_parse_interface_descriptor(cfg, n, 0, &offset);
+        if (intf == nullptr) continue;
+        if (intf->bInterfaceClass != USB_CLASS_HID_) continue;
+
+        m_hidIntf = intf->bInterfaceNumber;
+        ESP_LOGI(TAG, "  HID auf Interface %u", m_hidIntf);
+        return;
+    }
+}
+
+esp_err_t UsbTarget::hidGetFeature(uint8_t reportId, size_t length, std::string& error)
+{
+    error.clear();
+
+    if (m_hidIntf == PICOBOOT_NO_INTF)
+    {
+        error = "kein HID-Interface am Ziel gefunden";
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    usb_device_handle_t device = m_device;
+    if (device == nullptr)
+    {
+        error = "Zielgeraet ist nicht geoeffnet";
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const uint8_t intf = m_hidIntf;
+
+    esp_err_t err = usb_host_interface_claim(m_client, device, intf, 0);
+    if (err != ESP_OK)
+    {
+        error = std::string("HID-Interface nicht belegbar: ") + esp_err_to_name(err);
+        return err;
+    }
+
+    SemaphoreHandle_t sem  = xSemaphoreCreateBinary();
+    usb_transfer_t*   xfer = nullptr;
+
+    auto cleanup = [&]() {
+        if (xfer != nullptr) usb_host_transfer_free(xfer);
+        if (sem != nullptr) vSemaphoreDelete(sem);
+        // Nach einem Reboot ins Bootloader-Image ist das Geraet weg; Fehler normal.
+        usb_host_interface_release(m_client, device, intf);
+    };
+
+    if (sem == nullptr)
+    {
+        cleanup();
+        error = "kein Speicher fuer die Quittung";
+        return ESP_ERR_NO_MEM;
+    }
+
+    err = usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + length, 0, &xfer);
+    if (err != ESP_OK)
+    {
+        cleanup();
+        error = std::string("kein Transferpuffer: ") + esp_err_to_name(err);
+        return err;
+    }
+
+    auto* setup          = reinterpret_cast<usb_setup_packet_t*>(xfer->data_buffer);
+    setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_CLASS |
+                           USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
+    setup->bRequest      = HID_REQ_GET_REPORT;
+    setup->wValue        = static_cast<uint16_t>((HID_REPORT_FEATURE << 8) | reportId);
+    setup->wIndex        = intf;
+    setup->wLength       = static_cast<uint16_t>(length);
+
+    xfer->device_handle    = device;
+    xfer->bEndpointAddress = 0;
+    xfer->num_bytes        = sizeof(usb_setup_packet_t) + length;
+    xfer->callback         = &UsbTarget::picobootXferCb;
+    xfer->context          = sem;
+    xfer->timeout_ms       = PICOBOOT_TIMEOUT_MS;
+
+    err = usb_host_transfer_submit_control(m_client, xfer);
+    if (err != ESP_OK)
+    {
+        cleanup();
+        error = std::string("Feature-Report nicht absetzbar: ") + esp_err_to_name(err);
+        return err;
+    }
+
+    /*
+     * Wie bei PICOBOOT und beim 1200-Baud-Touch: bleibt die Quittung aus, ist
+     * das kein Fehler. Ein Ziel, das auf diesen Report hin neu startet, reisst
+     * den Transfer genau dabei ab — das ist der Erfolgsfall, nicht der
+     * Fehlerfall.
+     */
+    if (xSemaphoreTake(sem, pdMS_TO_TICKS(PICOBOOT_TIMEOUT_MS)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "HID-Feature 0x%02X: keine Quittung - Ziel startet vermutlich neu",
+                 reportId);
+    }
+    else if (xfer->status != USB_TRANSFER_STATUS_COMPLETED)
+    {
+        /*
+         * Ein Stall heisst: die Report-ID kennt das Ziel nicht. Das ist eine
+         * ehrliche Absage und wird auch als solche gemeldet — sonst behauptete
+         * die Probe einen Bootmodus, den es nie gab.
+         */
+        if (xfer->status == USB_TRANSFER_STATUS_STALL)
+        {
+            cleanup();
+            char ids[8];
+            snprintf(ids, sizeof(ids), "0x%02X", reportId);
+            error = std::string("Ziel kennt den Feature-Report ") + ids +
+                    " nicht (Stall) - andere Firmware, oder es steht schon im Bootloader";
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        ESP_LOGW(TAG, "HID-Feature 0x%02X: Status %d - Ziel startet vermutlich neu",
+                 reportId, static_cast<int>(xfer->status));
+    }
+
+    cleanup();
+    return ESP_OK;
+}
+
+esp_err_t UsbTarget::picobootReboot(std::string& error)
+{
+    error.clear();
+
+    if (m_picobootIntf == PICOBOOT_NO_INTF)
+    {
+        error = "Ziel bietet kein PICOBOOT-Interface an";
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    usb_device_handle_t device = m_device;
+    if (device == nullptr)
+    {
+        error = "Zielgeraet ist nicht geoeffnet";
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const uint8_t intf = m_picobootIntf;
+
+    esp_err_t err = usb_host_interface_claim(m_client, device, intf, 0);
+    if (err != ESP_OK)
+    {
+        error = std::string("PICOBOOT-Interface nicht belegbar: ") + esp_err_to_name(err);
+        return err;
+    }
+
+    SemaphoreHandle_t sem  = xSemaphoreCreateBinary();
+    usb_transfer_t*   xfer = nullptr;
+
+    auto cleanup = [&]() {
+        if (xfer != nullptr) usb_host_transfer_free(xfer);
+        if (sem != nullptr) vSemaphoreDelete(sem);
+        // Nach einem Neustart ist das Geraet weg; ein Fehler hier ist normal.
+        usb_host_interface_release(m_client, device, intf);
+    };
+
+    if (sem == nullptr)
+    {
+        cleanup();
+        error = "kein Speicher fuer die Quittung";
+        return ESP_ERR_NO_MEM;
+    }
+
+    err = usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + PICOBOOT_CMD_LEN, 0, &xfer);
+    if (err != ESP_OK)
+    {
+        cleanup();
+        error = std::string("kein Transferpuffer: ") + esp_err_to_name(err);
+        return err;
+    }
+
+    auto submitAndWait = [&](bool control) -> esp_err_t {
+        xfer->device_handle = device;
+        xfer->callback      = &UsbTarget::picobootXferCb;
+        xfer->context       = sem;
+        xfer->timeout_ms    = PICOBOOT_TIMEOUT_MS;
+
+        const esp_err_t sErr = control ? usb_host_transfer_submit_control(m_client, xfer)
+                                       : usb_host_transfer_submit(xfer);
+        if (sErr != ESP_OK) return sErr;
+
+        if (xSemaphoreTake(sem, pdMS_TO_TICKS(PICOBOOT_TIMEOUT_MS)) != pdTRUE)
+            return ESP_ERR_TIMEOUT;
+
+        return ESP_OK;
+    };
+
+    /*
+     * Schritt 1: das Interface zuruecksetzen. Das hebt haengende Stalls auf und
+     * ist der erste Griff, den picotool auch macht — ohne ihn kann eine
+     * abgebrochene Vorsitzung das Bulk-Paar blockiert lassen.
+     */
+    auto* setup          = reinterpret_cast<usb_setup_packet_t*>(xfer->data_buffer);
+    setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_OUT | USB_BM_REQUEST_TYPE_TYPE_VENDOR |
+                           USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
+    setup->bRequest      = PICOBOOT_IF_RESET;
+    setup->wValue        = 0;
+    setup->wIndex        = intf;
+    setup->wLength       = 0;
+
+    xfer->bEndpointAddress = 0;
+    xfer->num_bytes        = sizeof(usb_setup_packet_t);
+
+    err = submitAndWait(true);
+    if (err != ESP_OK)
+    {
+        cleanup();
+        error = std::string("PICOBOOT-Interface liess sich nicht zuruecksetzen: ") +
+                esp_err_to_name(err);
+        return err;
+    }
+
+    /*
+     * Schritt 2: das Kommandopaket. Die Felder werden einzeln und
+     * little-endian geschrieben, statt eine Struktur aus dem pico-sdk zu
+     * spiegeln — so haengt das Layout nicht am Packing des Compilers.
+     *
+     *   dMagic | dToken | bCmdId | bCmdSize | _unused | dTransferLength | args
+     *      4        4        1         1          2            4            16
+     *
+     * args ist hier picoboot_reboot_cmd: dPC, dSP, dDelayMS. **dPC = 0 heisst
+     * „zurueck in den regulaeren Boot-Pfad"** — genau das, was gebraucht wird.
+     * dSP wird dabei nicht ausgewertet.
+     */
+    uint8_t* cmd = xfer->data_buffer;
+    std::memset(cmd, 0, PICOBOOT_CMD_LEN);
+    put32(cmd + 0, PICOBOOT_MAGIC);
+    put32(cmd + 4, 1);  // dToken, nur zum Korrelieren einer Statusabfrage
+    cmd[8]  = PC_REBOOT;
+    cmd[9]  = 12;  // bCmdSize: drei uint32 in args
+    put32(cmd + 12, 0);                      // dTransferLength
+    put32(cmd + 16, 0);                      // dPC = 0 -> regulaerer Boot-Pfad
+    put32(cmd + 20, 0);                      // dSP, bei dPC = 0 ohne Bedeutung
+    put32(cmd + 24, PICOBOOT_DELAY_MS);      // dDelayMS
+
+    xfer->bEndpointAddress = m_picobootEpOut;
+    xfer->num_bytes        = PICOBOOT_CMD_LEN;
+
+    err = usb_host_transfer_submit(xfer);
+    if (err != ESP_OK)
+    {
+        cleanup();
+        error = std::string("PICOBOOT-Kommando nicht absetzbar: ") + esp_err_to_name(err);
+        return err;
+    }
+
+    /*
+     * Auf die Quittung wird gewartet, ihr Ausbleiben ist aber kein Fehler: das
+     * Ziel startet nach dDelayMS neu und reisst den Transfer dabei ab. Genau
+     * dieselbe Nachsicht wie beim 1200-Baud-Touch, wo das Geraet noch waehrend
+     * des Steuertransfers verschwindet.
+     */
+    if (xSemaphoreTake(sem, pdMS_TO_TICKS(PICOBOOT_TIMEOUT_MS)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "PICOBOOT: keine Quittung - Ziel startet vermutlich schon neu");
+    }
+    else if (xfer->status != USB_TRANSFER_STATUS_COMPLETED)
+    {
+        ESP_LOGW(TAG, "PICOBOOT: Transfer endete mit Status %d - Ziel startet vermutlich neu",
+                 static_cast<int>(xfer->status));
+    }
+
+    cleanup();
+    return ESP_OK;
+}
+
+esp_err_t UsbTarget::resetTarget(ResetMode mode, std::string& error)
+{
+    error.clear();
+
+    const ResetSupport support = resetSupport(mode);
+    if (!support.possible)
+    {
+        error = support.how;
+        // "nichts angesteckt" ist ein anderer Fehler als "kann das Geraet nicht".
+        return (state() != State::Connected) ? ESP_ERR_INVALID_STATE : ESP_ERR_NOT_SUPPORTED;
+    }
+
+    const DeviceInfo info = device();
+
+    /*
+     * Schon im BOOTSEL - hier kommt ohnehin nur der Bootmodus an. Die Abfrage
+     * muss dieselbe sein wie in resetSupport(): ein Geraet, das sich gerade
+     * erst als Massenspeicher meldet und dessen MSC-Sitzung noch nicht offen
+     * ist, liefe sonst in die DTR/RTS-Zweige und scheiterte dort mit einer
+     * irrefuehrenden Meldung.
+     */
+    if (isMscReady() || info.kind == Kind::Bootsel || info.kind == Kind::Msc)
+    {
+        // Bootmodus ist schon erreicht; zurueck in die Anwendung geht nur ueber
+        // PICOBOOT, und resetSupport() hat vorher geprueft, dass es das gibt.
+        if (mode == ResetMode::Bootloader) return ESP_OK;
+        return picobootReboot(error);
+    }
+
+    if (info.kind == Kind::Cdc && info.vid == VID_RASPBERRY)
+    {
+        // Ebenfalls nur Bootmodus: Run hat resetSupport() schon abgelehnt.
+        return enterBootsel(error);
+    }
+
+    if (info.kind == Kind::HidBootloader) return ESP_OK;  // steht schon dort
+
+    if (info.kind == Kind::Hid)
+    {
+        // Nur Bootmodus kommt hier an, Run hat resetSupport() abgelehnt.
+        return hidGetFeature(HID_BOOT_REPORT, 64, error);
+    }
+
+    const esp_err_t err =
+        (info.kind == Kind::SerialBridge) ? bridgeReset(mode) : jtagReset(mode);
+
+    if (err != ESP_OK)
+    {
+        error = std::string("Steuerleitungen liessen sich nicht setzen: ") +
+                esp_err_to_name(err);
+        return err;
+    }
+
+    /*
+     * Nach einem Neustart in die Anwendung soll die Konsole sofort wieder
+     * mitlesen koennen, also zurueck in den Ruhezustand. Im Bootmodus bleibt
+     * stehen, was die Folge hinterlassen hat: dort wartet als Naechstes ein
+     * Flash-Werkzeug, das seine Leitungen ohnehin selbst setzt.
+     */
+    if (mode == ResetMode::Run) resetControlLines();
+
+    return ESP_OK;
+}
+
 esp_err_t UsbTarget::writeSector(uint32_t sector, const void* data, size_t size)
 {
     msc_host_device_handle_t handle = m_msc;
@@ -874,6 +1569,13 @@ void UsbTarget::onNewDevice(uint8_t address)
     if (info.kind == Kind::Bootsel)
     {
         ESP_LOGW(TAG, "  RP2040 im BOOTSEL-Modus, bereit fuer UF2");
+        // Legt fest, ob /api/reset aus dem BOOTSEL heraus etwas kann.
+        findPicoboot(handle);
+    }
+    else if (info.kind == Kind::Hid || info.kind == Kind::HidBootloader)
+    {
+        // Fuer Feature-Reports ueber Endpunkt 0 (rv003usb-Bootmodus).
+        findHid(handle);
     }
     else if (info.driver == Driver::Unsupported)
     {
@@ -900,6 +1602,11 @@ void UsbTarget::onDeviceGone(usb_device_handle_t handle)
         m_stateSinceUs = esp_timer_get_time();
     }
     xSemaphoreGive(m_mutex);
+
+    m_picobootIntf  = PICOBOOT_NO_INTF;
+    m_picobootEpOut = 0;
+    m_picobootEpIn  = 0;
+    m_hidIntf       = PICOBOOT_NO_INTF;
 
     usb_host_device_close(m_client, handle);
 }

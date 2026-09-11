@@ -4,7 +4,6 @@
 #include <cstring>
 
 #include "esp_log.h"
-#include "generated/index_html.hpp"
 
 namespace {
 constexpr const char* TAG = "web";
@@ -128,11 +127,6 @@ esp_err_t WebServer::staticHandler(httpd_req_t* req)
     httpd_resp_set_type(req, blob->contentType);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, blob->body, blob->length);
-}
-
-esp_err_t WebServer::serveDefaultIndex()
-{
-    return serveStatic("/", INDEX_HTML, INDEX_HTML_LEN);
 }
 
 esp_err_t WebServer::setNotFoundHandler(httpd_err_handler_func_t fn)

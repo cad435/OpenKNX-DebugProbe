@@ -1,0 +1,11 @@
+dependencies:
+  idf:
+    version: ">=5.1"
+
+  # LittleFS fuer die Web-Oberflaeche in der Partition `storage`.
+  #
+  # Bewusst nicht SPIFFS: das kennt keine Verzeichnisse, hat kein definiertes
+  # Verhalten bei Stromausfall und mountet mit wachsender Partition immer
+  # langsamer. LittleFS ist copy-on-write — bei einer Probe, deren 5 V aus dem
+  # Pruefaufbau kommen, ist ein Reset mitten im Schreiben der Normalfall.
+  joltwallet/littlefs: "^1.16"

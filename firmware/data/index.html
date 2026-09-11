@@ -51,6 +51,7 @@ input#cmd{flex:1 1 18rem;min-width:0;
        font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}
 input#cmd:disabled{opacity:.5}
 .note.err{color:var(--err)}
+.warnval{color:var(--warn);font-weight:600}
 progress{width:100%;height:.5rem;margin-top:.75rem}
 .msg{margin-top:.75rem;font-size:.875rem}
 .msg.ok{color:var(--ok)}
@@ -78,6 +79,13 @@ pre#con{margin:0;padding:.7rem .8rem;height:min(58vh,32rem);overflow:auto;border
   <section class="wide">
     <h2>Zielgerät am USB-C</h2>
     <div id="target"></div>
+
+    <div class="row" style="margin-top:.9rem">
+      <button class="ghost" id="goreset" disabled>Neu starten</button>
+      <button class="ghost" id="gobootmode" disabled>In den Bootmodus</button>
+      <span class="msg" id="tmsg" style="margin-top:0"></span>
+    </div>
+    <p class="note" id="tnote"></p>
   </section>
 
   <section id="snipsec" class="wide" hidden>
@@ -174,6 +182,7 @@ pre#con{margin:0;padding:.7rem .8rem;height:min(58vh,32rem);overflow:auto;border
       <dt>WLAN</dt><dd id="wifi">–</dd>
       <dt>IP</dt><dd id="ip">–</dd>
       <dt>Funk</dt><dd id="radio">–</dd>
+      <dt>Letzter Start</dt><dd id="rst">–</dd>
       <dt>Laufzeit</dt><dd id="up">–</dd>
       <dt>Freier Heap</dt><dd id="heap">–</dd>
     </dl>
@@ -319,6 +328,23 @@ async function poll(){
     // Der Funk dost, solange niemand auf 2323 oder 4000 haengt.
     $("radio").textContent = s.radio_awake === undefined ? "–"
       : (s.radio_awake ? "dauerhaft wach (Client aktiv)" : "Sparmodus");
+    /*
+     * Der Grund des letzten Starts ueberlebt den Neustart. Ein Zielgeraet mit
+     * hohem Einschaltstrom kann die Probe per Brownout zuruecksetzen — dann
+     * steht hier "Unterspannung" statt "eingeschaltet", und man sucht den
+     * Fehler nicht in der Firmware.
+     */
+    const RST = {
+      poweron:"eingeschaltet", software:"Neustart per Software (z. B. nach OTA)",
+      panic:"Absturz (Panic)", int_wdt:"Watchdog (Interrupt)",
+      task_wdt:"Watchdog (Task)", wdt:"Watchdog", deepsleep:"aus dem Deep Sleep",
+      brownout:"Unterspannung (Brownout)", sdio:"SDIO", extern:"externer Reset"
+    };
+    const rst = $("rst");
+    rst.textContent = RST[s.reset_reason] || (s.reset_reason || "–");
+    rst.className = (s.reset_reason === "brownout" || s.reset_reason === "panic"
+                     || s.reset_reason === "int_wdt" || s.reset_reason === "task_wdt"
+                     || s.reset_reason === "wdt") ? "warnval" : "";
     $("up").textContent   = fmtDuration(s.uptime_s);
     $("heap").textContent = (s.heap_free/1024).toFixed(0) + " KB";
     renderTarget(s.target);
@@ -381,6 +407,24 @@ async function poll(){
       note.className    = "note";
       note.textContent  = "";
     }
+
+    /*
+     * Ob Neustart und Bootmodus gehen, entscheidet die Probe (can_reset /
+     * can_bootmode in /api/status). Das UI baut die Tabelle aus UsbTarget.hpp
+     * bewusst nicht nach — sonst liefe es bei jedem neuen Zieltyp hinterher.
+     * Waehrend ein Auftrag laeuft, fasst der Poll die Knoepfe nicht an: ein
+     * 1200-Baud-Touch darf bis zu zweimal 5 s dauern.
+     */
+    const tg = s.target || {};
+    if(!tBusy){
+      $("goreset").disabled    = !tg.can_reset;
+      $("gobootmode").disabled = !tg.can_bootmode;
+    }
+    $("goreset").title    = tg.reset_how    || "";
+    $("gobootmode").title = tg.bootmode_how || "";
+    $("tnote").innerHTML =
+      "Neu starten: " + esc(tg.reset_how    || "\u2013") + "<br>" +
+      "Bootmodus: "   + esc(tg.bootmode_how || "\u2013");
 
     const bootsel = s.target && s.target.kind === "bootsel";
     $("goflash").disabled = !(rp2040 && $("uf2").files.length);
@@ -539,6 +583,53 @@ $("go").addEventListener("click", () => {
     $("go").disabled = false;
   };
   xhr.send(f);
+});
+
+/*
+ * Neustart und Bootmodus des Ziels.
+ *
+ * Beide Endpunkte antworten mit `method` — dem Verfahren, das die Probe
+ * tatsaechlich genommen hat. Das steht absichtlich in der Rueckmeldung: beim
+ * Bootmodus ist daran zu sehen, ob getouched wurde oder ob das Ziel schon im
+ * BOOTSEL stand.
+ *
+ * Waehrend der Anfrage laeuft, verschwindet das Ziel kurz vom Bus und taucht
+ * neu auf. Der Poll setzt die Knoepfe danach von selbst wieder richtig,
+ * deshalb wird hier nur gesperrt und `tBusy` gesetzt.
+ */
+let tBusy = false;
+
+async function targetAction(url, label){
+  const m = $("tmsg");
+  tBusy = true;
+  $("goreset").disabled = true;
+  $("gobootmode").disabled = true;
+  m.className = "msg";
+  m.textContent = label + "\u2026";
+
+  try{
+    const r = await fetch(url, {method:"POST"});
+    let j = {};
+    try{ j = await r.json(); }catch(e){}
+    if(r.ok){
+      m.className = "msg ok";
+      m.textContent = label + ": " + (j.method || "ausgef\u00fchrt");
+    }else{
+      m.className = "msg err";
+      m.textContent = j.error || ("Abgelehnt (HTTP " + r.status + ")");
+    }
+  }catch(e){
+    m.className = "msg err";
+    m.textContent = "Keine Verbindung zur Probe.";
+  }
+  tBusy = false;
+}
+
+$("goreset").addEventListener("click", () => {
+  targetAction("/api/reset", "Neustart");
+});
+$("gobootmode").addEventListener("click", () => {
+  targetAction("/api/bootmode", "Bootmodus");
 });
 
 $("goflash").addEventListener("click", () => {

@@ -9,7 +9,16 @@
 # keine Ausgabe, kein Fehler.
 #
 # ota_0 / ota_1 : zwei App-Slots à 1,875 MB für OTA mit Rollback
-# storage       : 192 KB Reserve für Logs/Konfiguration
+# storage       : 192 KB LittleFS für die Web-Oberflaeche (und spaeter Logs)
+#
+# storage ist LittleFS (Subtype 0x83), nicht SPIFFS: SPIFFS kennt keine
+# Verzeichnisse, hat kein definiertes Verhalten bei Stromausfall und mountet mit
+# wachsender Partition immer langsamer. LittleFS ist copy-on-write und uebersteht
+# einen Reset mitten im Schreiben — bei einer Probe, die ihre 5 V aus dem
+# Pruefaufbau zieht, ist das keine Theorie.
+#
+# ACHTUNG: Ein Wechsel des Subtypes aendert die Partitionstabelle und geht damit
+# NICHT per OTA — er braucht einen seriellen Reflash der Tabelle bei 0x8000.
 #
 # Kein Staging-Bereich für die UF2 des Zielgeräts: bei 4 MB Flash bliebe dafür
 # zu wenig übrig. Die UF2 wird stattdessen im PSRAM (2 MB) gepuffert und
@@ -21,4 +30,4 @@ otadata,    data, ota,      0xD000,   0x2000,
 phy_init,   data, phy,      0xF000,   0x1000,
 ota_0,      app,  ota_0,    0x10000,  0x1E0000,
 ota_1,      app,  ota_1,    0x1F0000, 0x1E0000,
-storage,    data, spiffs,   0x3D0000, 0x30000,
+storage,    data, littlefs, 0x3D0000, 0x30000,

@@ -40,9 +40,6 @@ public:
                           size_t      length,
                           const char* contentType = "text/html; charset=utf-8");
 
-    /// Registers "/" with the built-in status/OTA page.
-    esp_err_t serveDefaultIndex();
-
     esp_err_t setNotFoundHandler(httpd_err_handler_func_t fn);
 
     static esp_err_t sendJson(httpd_req_t* req, const std::string& json);

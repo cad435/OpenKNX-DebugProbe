@@ -77,6 +77,19 @@ Status and update page. In portal mode the provisioning form instead.
 `target` and `console` are absent while the USB host has not been started; the fields inside
 `target` only exist in state `connected`.
 
+Four fields inside `target` are the exception — they exist in every state, because the web UI
+needs them to decide whether the restart buttons do anything at all:
+
+| field | meaning |
+|---|---|
+| `can_reset` | a restart into the target's own application is possible |
+| `reset_how` | the method used, or — when `can_reset` is `false` — the reason |
+| `can_bootmode` | the target can be halted in its bootloader |
+| `bootmode_how` | same, for the bootloader |
+
+Both `*_how` fields are plain German text meant to be shown to a human. Do not parse them;
+they are documentation, not a protocol.
+
 One call is enough for the whole web UI page — it polls this single route.
 
 ### `POST /api/update` **[live]** — firmware of the **probe**
@@ -98,6 +111,43 @@ curl.exe --fail-with-body --data-binary "@firmware/.pio/build/probe/firmware.bin
 Checked before the first write: image magic `0xE9`, a present `esp_app_desc_t`, and a
 matching project name. In particular this keeps a UF2 that was actually meant for the target
 from ending up in the ESP32 by accident.
+
+### `POST /api/fs` **[live]** — the web UI (filesystem image)
+
+Writes the LittleFS image into the `storage` partition. The counterpart of `/api/update`:
+that one carries the firmware, this one the interface. Body is the raw `littlefs.bin`.
+
+```
+curl.exe --fail-with-body --data-binary "@firmware/.pio/build/probe/littlefs.bin" http://openknx-probe-xxxx.local/api/fs
+```
+
+```json
+{"status":"ok","written":196608,"total_kb":180,"used_kb":28,"index":true}
+```
+
+`index` is `false` when the image contains no `index.html` — the upload worked, but the probe
+will still serve the built-in emergency page.
+
+| code | meaning |
+|---|---|
+| 400 | empty body, too short, or not a LittleFS image |
+| 409 | an upload is already running |
+| 413 | image larger than the partition |
+| 500 | erase, write, or remount failed |
+
+**Why this endpoint exists at all.** Without it, every change to the interface needs a serial
+`pio run -t uploadfs`. On a probe whose USB-C port is occupied by the target under test, that
+means unplugging cables — the exact thing this project exists to abolish.
+
+**The image is validated before anything is erased.** LittleFS carries the string `littlefs`
+at offset 8 of its first block; that is checked the same way `/api/update` checks the ESP32
+image magic. A `firmware.bin` sent here is refused rather than silently turned into an empty
+interface.
+
+**An aborted upload is not fatal.** The filesystem is unmounted for the duration, so a broken
+transfer leaves the partition incomplete — the probe keeps running, serves the emergency page,
+and this endpoint stays reachable. A second attempt repairs it. What cannot be repaired this
+way is a probe that no longer joins the network; that is what the serial path is for.
 
 ### `GET /api/scan` **[live]**
 
@@ -216,21 +266,71 @@ The bytes take the same path as those of a TCP client on port 2323, so they are 
 Verified on hardware against an OpenKNX fan actuator: `h` returns the complete help,
 `uptime` the running time — both entered through the web console.
 
-### `POST /api/bootsel` **[live]**
+### `POST /api/reset` **[live]** — restart the target
 
-Pushes a running RP2040 target into BOOTSEL with a 1200-baud touch, without writing
-anything. No body. The same thing `/api/flash` does internally — useful for testing the
-touch without overwriting the target's firmware, and as a button in the web UI.
+Restarts the attached target into its own application. No body.
 
 ```json
-{"status":"bootsel","touched":true,"msc_kb":131071}
+{"status":"reset","method":"RTS-Puls auf EN (esptool-Hard-Reset)","msc_ready":false}
 ```
 
-`touched` is `false` when the target already sat in BOOTSEL and there was nothing to do. On
-failure, `409` with the same `error` text as `/api/flash`.
+`method` names what the probe actually did, which differs per target — there is no single
+mechanism that restarts every device over USB:
 
-The target returns to its application through a reset (RUN button or power cycle) or through
+| target | reset into the application |
+|---|---|
+| UART bridge (CH34x / CP210x / FTDI) | RTS pulse on EN, the esptool hard reset |
+| Espressif with native USB | RTS pulse through the USB-Serial-JTAG, after clearing the boot latch |
+| RP2040 (CDC) | **not directly** — but bootmode followed by reset gets there via the boot ROM |
+| RP2040 in BOOTSEL | PICOBOOT reboot over the boot ROM's vendor interface |
+
+**A running RP2040 with native USB cannot be reset directly.** DTR and RTS end up in the
+target's firmware, not at its RUN pin, and there is no line in between. The endpoint says so
+instead of pretending: `409` with the reason in `error`. Ask `/api/status` beforehand —
+`can_reset` carries the same answer without touching anything.
+
+**It still works remotely, in two steps:** `POST /api/bootmode`, then `POST /api/reset`. The
+first uses the 1200-baud touch, the second the boot ROM's PICOBOOT interface — the same one
+`picotool reboot` drives. The route goes through the boot ROM, but it needs no cable. Once a
+target sits in BOOTSEL, `/api/status` reports `picoboot: true` and `can_reset: true`.
+
+### `POST /api/bootmode` **[live]** — halt the target in its bootloader
+
+The counterpart. No body.
+
+```json
+{"status":"bootmode","method":"1200-Baud-Touch","msc_ready":true,"msc_kb":131071}
+```
+
+| target | into the bootloader |
+|---|---|
+| UART bridge | DTR/RTS sequence on IO0 and EN, the esptool bootloader reset |
+| Espressif with native USB | DTR/RTS sequence through the USB-Serial-JTAG, setting the boot latch |
+| RP2040 (CDC) | 1200-baud touch — the same thing `/api/flash` does internally |
+| RP2040 in BOOTSEL | nothing to do, `method` says so |
+
+Useful for testing the touch without overwriting the target's firmware, and as a button in
+the web UI. On failure, `409` with the same `error` text as `/api/flash`.
+
+An RP2040 returns to its application through a reset (RUN button or power cycle) or through
 the next `POST /api/flash`. The flash contents are untouched by the touch.
+
+**Both control-line sequences set DTR and RTS in a single USB control transfer.** The
+intermediate state that pyserial produces over RFC2217 — one line at a time, roughly 50 ms
+apart — never occurs here. That state is exactly what the auto-reset circuit on ESP32 boards
+is built to ignore.
+
+**On chips with a native USB-Serial-JTAG the same interlock lives inside the chip**, which
+is why download mode is not selected by a pin level but by a latch: a phase with DTR
+asserted is remembered, and the next reset then boots into download mode. The probe clears
+that latch before a plain restart and sets it before a bootloader entry. Verified on an
+ESP32-S3: `/api/reset` yields `boot:0x2b (SPI_FAST_FLASH_BOOT)`, `/api/bootmode` yields
+`boot:0x23 (DOWNLOAD(USB/UART0))`.
+
+### `POST /api/bootsel` **[live]** — deprecated alias
+
+The old name of `/api/bootmode`, from when the only supported target was an RP2040. Same
+handler, same response — including `status:"bootmode"`. New code should use `/api/bootmode`.
 
 ### `GET /api/snippet` **[live]**
 

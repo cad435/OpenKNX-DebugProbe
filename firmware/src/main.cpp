@@ -22,10 +22,12 @@
 #include "StatusLed.hpp"
 #include "Uf2Flasher.hpp"
 #include "UsbTarget.hpp"
+#include "AssetStore.hpp"
 #include "WebServer.hpp"
 #include "WiFiManager.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -233,11 +235,51 @@ std::string snippetJson(const Snippet& s)
     return json;
 }
 
+/**
+ * Warum die Probe das letzte Mal gestartet ist.
+ *
+ * Der Grund ueberlebt den Neustart im RTC-Speicher, und genau das macht ihn
+ * wertvoll: ein Zielgeraet mit hohem Einschaltstrom kann die Probe per
+ * Brownout zuruecksetzen, und hinterher ist nicht mehr zu sehen, ob es der
+ * Strom war oder ein Absturz. `brownout` beantwortet das, ohne ein Bauteil und
+ * ohne einen Blick auf die serielle Konsole.
+ */
+const char* resetReasonName()
+{
+    switch (esp_reset_reason())
+    {
+        case ESP_RST_POWERON:   return "poweron";
+        case ESP_RST_SW:        return "software";      // z. B. nach einem OTA
+        case ESP_RST_PANIC:     return "panic";
+        case ESP_RST_INT_WDT:   return "int_wdt";
+        case ESP_RST_TASK_WDT:  return "task_wdt";
+        case ESP_RST_WDT:       return "wdt";
+        case ESP_RST_DEEPSLEEP: return "deepsleep";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_SDIO:      return "sdio";
+        case ESP_RST_EXT:       return "extern";
+        default:                return "unbekannt";
+    }
+}
+
 std::string targetJson(const UsbTarget& usb)
 {
     std::string json = "{";
     json += "\"state\":" + jsonString(usb.stateName());
     json += ",\"since_s\":" + std::to_string(usb.secondsInState());
+
+    /*
+     * Was fuer dieses Ziel moeglich ist, entscheidet die Probe - nicht das
+     * Web-UI. Sonst muesste die Oberflaeche die Tabelle aus UsbTarget.hpp
+     * nachbauen und liefe bei jedem neuen Geraetetyp hinterher. `*_how`
+     * traegt bei `can_* == false` den Grund und steht im UI als Hinweis.
+     */
+    const UsbTarget::ResetSupport run  = usb.resetSupport(UsbTarget::ResetMode::Run);
+    const UsbTarget::ResetSupport boot = usb.resetSupport(UsbTarget::ResetMode::Bootloader);
+    json += ",\"can_reset\":" + std::string(run.possible ? "true" : "false");
+    json += ",\"reset_how\":" + jsonString(run.how);
+    json += ",\"can_bootmode\":" + std::string(boot.possible ? "true" : "false");
+    json += ",\"bootmode_how\":" + jsonString(boot.how);
 
     if (usb.state() == UsbTarget::State::Connected)
     {
@@ -260,6 +302,7 @@ std::string targetJson(const UsbTarget& usb)
         // schon im BOOTSEL steht.
         json += ",\"uf2_capable\":" + std::string((info.vid == 0x2E8A) ? "true" : "false");
         json += ",\"msc_ready\":" + std::string(usb.isMscReady() ? "true" : "false");
+        json += ",\"picoboot\":" + std::string(usb.hasPicoboot() ? "true" : "false");
         if (usb.isMscReady())
         {
             json += ",\"msc_kb\":" +
@@ -295,6 +338,7 @@ esp_err_t handleStatus(httpd_req_t* req)
     json += "\"build\":" + jsonString(ctx->ota->buildTimestamp()) + ",";
     json += "\"partition\":" + jsonString(ctx->ota->runningPartition()) + ",";
     json += "\"pending_verify\":" + std::string(ctx->ota->isPendingVerify() ? "true" : "false") + ",";
+    json += "\"reset_reason\":" + jsonString(resetReasonName()) + ",";
     json += "\"wifi\":" + jsonString(ctx->wifi->stateName()) + ",";
     json += "\"ssid\":" + jsonString(ctx->wifi->ssid()) + ",";
     json += "\"rssi\":" + std::to_string(ctx->wifi->rssi()) + ",";
@@ -455,33 +499,109 @@ esp_err_t handleFlash(httpd_req_t* req)
 }
 
 /**
- * POST /api/bootsel — Ziel per 1200-Baud-Touch nach BOOTSEL schicken.
+ * Gemeinsamer Rumpf von POST /api/reset und POST /api/bootmode.
  *
- * Dasselbe, was `/api/flash` selbst tut, nur ohne zu schreiben. Zwei Gruende:
- * das Web-UI kann damit einen Knopf anbieten statt „Taster druecken", und der
- * Touch laesst sich pruefen, ohne die Firmware des Ziels zu ueberschreiben.
+ * Beides ist derselbe Vorgang mit unterschiedlichem Ziel, und welcher Griff
+ * dafuer noetig ist, weiss `UsbTarget` — ein RP2040 braucht den
+ * 1200-Baud-Touch, ein ESP32 hinter einem Bridge-Chip eine DTR/RTS-Folge.
+ * Deshalb steht hier keine Fallunterscheidung, sondern nur die HTTP-Huelle.
+ *
+ * `method` in der Antwort nennt das tatsaechlich verwendete Verfahren. Das ist
+ * kein Schmuck: beim Bootmodus sieht man daran, ob getouched wurde oder ob das
+ * Ziel ohnehin schon im BOOTSEL stand.
  */
-esp_err_t handleBootsel(httpd_req_t* req)
+esp_err_t handleTargetReset(httpd_req_t* req, UsbTarget::ResetMode mode)
 {
     auto* ctx = static_cast<AppContext*>(req->user_ctx);
 
-    const bool wasReady = ctx->usb->isMscReady();
+    const bool isRun = (mode == UsbTarget::ResetMode::Run);
+    const char* what = isRun ? "Neustart" : "Bootmodus";
+
+    // Vor dem Umschalten abfragen: danach meldet ein RP2040 im BOOTSEL
+    // "steht bereits dort" und die Antwort verschwiege, was gerade passiert ist.
+    const UsbTarget::ResetSupport support = ctx->usb->resetSupport(mode);
+
+    /*
+     * Die Marke geht VOR den Eingriff in den Mitschnitt.
+     *
+     * resetTarget() haelt die Steuerleitungen einige hundert Millisekunden —
+     * das Ziel resettet und schreibt seinen ROM-Boot-Log noch waehrend des
+     * Aufrufs in den Ringpuffer. Eine Marke danach stuende im Protokoll hinter
+     * ihrer eigenen Wirkung und liesse sich nicht mehr als Ursache lesen.
+     * handleFlash() macht es mit "Flashen gestartet" genauso.
+     *
+     * Nur bei `possible`: sonst traegt `how` nicht das Verfahren, sondern den
+     * Grund, warum es nicht geht — als Ankuendigung waere das irrefuehrend.
+     */
+    if (support.possible)
+    {
+        ESP_LOGI(TAG, "%s: %s", what, support.how.c_str());
+        const std::string line =
+            (isRun ? "starte Ziel neu: " : "schicke Ziel in den Bootmodus: ") + support.how;
+        ctx->bridge->note(line.c_str());
+    }
 
     std::string error;
-    if (ctx->usb->enterBootsel(error) != ESP_OK)
+    if (ctx->usb->resetTarget(mode, error) != ESP_OK)
     {
-        ESP_LOGE(TAG, "BOOTSEL nicht erreicht: %s", error.c_str());
+        ESP_LOGE(TAG, "%s nicht moeglich: %s", what, error.c_str());
+
+        // Angekuendigt und dann doch gescheitert — das muss im Mitschnitt
+        // stehen, sonst deutet die Marke oben auf einen Neustart, den es nie
+        // gab. note() kuerzt lange Begruendungen; vollstaendig stehen sie in
+        // der HTTP-Antwort.
+        if (support.possible)
+        {
+            const std::string bad =
+                std::string(isRun ? "Neustart" : "Bootmodus") + " fehlgeschlagen: " + error;
+            ctx->bridge->note(bad.c_str());
+        }
+
         return WebServer::sendStatus(req, "409 Conflict",
                                      R"({"error":)" + jsonString(error) + "}");
     }
 
-    std::string json = "{\"status\":\"bootsel\",\"touched\":";
-    json += wasReady ? "false" : "true";
-    json += ",\"msc_kb\":" +
-            std::to_string(static_cast<uint64_t>(ctx->usb->mscSectorCount()) *
-                           ctx->usb->mscSectorSize() / 1024);
+    // Kein Erfolgsvermerk: die Marke oben steht schon da, und der Boot-Log des
+    // Ziels direkt darunter ist der eigentliche Beweis.
+
+    std::string json = "{\"status\":";
+    json += isRun ? R"("reset")" : R"("bootmode")";
+    json += ",\"method\":" + jsonString(support.how);
+    json += ",\"msc_ready\":" + std::string(ctx->usb->isMscReady() ? "true" : "false");
+    if (ctx->usb->isMscReady())
+    {
+        json += ",\"msc_kb\":" +
+                std::to_string(static_cast<uint64_t>(ctx->usb->mscSectorCount()) *
+                               ctx->usb->mscSectorSize() / 1024);
+    }
     json += "}";
     return WebServer::sendJson(req, json);
+}
+
+/**
+ * POST /api/reset — Ziel neu starten, Anwendung laeuft an.
+ *
+ * Geht nicht bei jedem Ziel. Ein RP2040 mit nativem USB hat keine
+ * Reset-Leitung am Kabel; `/api/status` sagt unter `can_reset` vorher, ob der
+ * Knopf ueberhaupt etwas bewirkt, und `reset_how` warum nicht.
+ */
+esp_err_t handleReset(httpd_req_t* req)
+{
+    return handleTargetReset(req, UsbTarget::ResetMode::Run);
+}
+
+/**
+ * POST /api/bootmode — Ziel im Bootlader anhalten.
+ *
+ * Beim RP2040 ist das der 1200-Baud-Touch nach BOOTSEL, also dasselbe, was
+ * `/api/flash` selbst tut, nur ohne zu schreiben — damit laesst sich der Touch
+ * pruefen, ohne die Firmware des Ziels anzufassen.
+ *
+ * `/api/bootsel` bleibt als alter Name auf denselben Handler gelegt.
+ */
+esp_err_t handleBootmode(httpd_req_t* req)
+{
+    return handleTargetReset(req, UsbTarget::ResetMode::Bootloader);
 }
 
 /**
@@ -736,6 +856,7 @@ extern "C" void app_main(void)
 {
     static Settings    settings("probe");
     static WebServer   web;
+    static AssetStore  assets;
     static OtaUpdater  ota;
     static WiFiManager  wifi(settings);
     static UsbTarget    usb;
@@ -766,12 +887,24 @@ extern "C" void app_main(void)
     WiFiManager::Config cfg;  // Defaults: 3 Versuche, sonst Notfall-Portal
     ESP_ERROR_CHECK(wifi.init(cfg));
 
-    ESP_ERROR_CHECK(web.begin(80));
+    ESP_ERROR_CHECK(web.begin(80, 20));
+
+    // Die Oberflaeche liegt im LittleFS, nicht mehr im Firmware-Image.
+    // Ein Fehlschlag ist nicht fatal: AssetStore liefert dann die
+    // eingebaute Notfallseite aus.
+    const esp_err_t assetsErr = assets.mount();
+    if (assetsErr != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Web-Assets nicht verfuegbar: %s", esp_err_to_name(assetsErr));
+    }
 
     g_ctx = AppContext{&settings, &wifi, &ota, &usb, &bridge, &rfc2217, &led};
     ESP_ERROR_CHECK(web.on("/api/status", HTTP_GET, &handleStatus, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/flash", HTTP_POST, &handleFlash, &g_ctx));
-    ESP_ERROR_CHECK(web.on("/api/bootsel", HTTP_POST, &handleBootsel, &g_ctx));
+    ESP_ERROR_CHECK(web.on("/api/reset", HTTP_POST, &handleReset, &g_ctx));
+    ESP_ERROR_CHECK(web.on("/api/bootmode", HTTP_POST, &handleBootmode, &g_ctx));
+    // Alter Name aus der Zeit, als es nur den RP2040-Touch gab.
+    ESP_ERROR_CHECK(web.on("/api/bootsel", HTTP_POST, &handleBootmode, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/led", HTTP_POST, &handleLed, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_POST, &handleConsoleSend, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_GET, &handleConsole, &g_ctx));
@@ -785,7 +918,10 @@ extern "C" void app_main(void)
 
     if (wifi.state() != WiFiManager::State::Portal)
     {
-        ESP_ERROR_CHECK(web.serveDefaultIndex());
+        // ZULETZT: die Wildcard-Route "/*" wuerde sonst die /api-Routen
+        // verschlucken — esp_http_server nimmt den ersten passenden
+        // Handler in Registrierungsreihenfolge.
+        ESP_ERROR_CHECK(assets.registerRoutes(web));
         ESP_LOGI(TAG, "ready: http://%s.local/", wifi.hostname().c_str());
     }
 
