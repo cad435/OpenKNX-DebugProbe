@@ -1499,8 +1499,15 @@ void UsbTarget::identify(DeviceInfo& info)
             info.description = "USB-Massenspeicher";
             break;
         case USB_CLASS_HID_:
+            /*
+             * HidRaw statt Unsupported: fuer HID braucht es keinen
+             * Host-Treiber. Feature-Reports laufen als Klassen-Steuertransfer
+             * ueber Endpunkt 0, und genau darueber geht der Bootmodus eines
+             * rv003usb-Ziels (Report 0xAB) und das ganze B003-Protokoll.
+             * "kein Host-Treiber" waere hier schlicht falsch.
+             */
             info.kind        = Kind::Hid;
-            info.driver      = Driver::Unsupported;
+            info.driver      = Driver::HidRaw;
             info.description = "USB-HID-Geraet";
             break;
         case USB_CLASS_HUB_:
