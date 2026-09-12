@@ -112,8 +112,6 @@ public:
     /// Liegt die Adresse im Flash (und nicht im RAM oder in der Peripherie)?
     static bool isFlashAddress(uint32_t address);
 
-    const std::vector<uint8_t>& lastResponse() const { return m_resp; }
-
     size_t scratchpadSize() const { return m_scratchpad; }
     size_t dataSize() const { return m_dataSize; }
 

@@ -156,6 +156,17 @@ pre#con{margin:0;padding:.7rem .8rem;height:min(58vh,32rem);overflow:auto;border
     <p class="note" id="fnote"></p>
   </section>
 
+  <section id="ch32sec" hidden>
+    <h2>Firmware des Zielgeräts (CH32V003)</h2>
+    <div class="row">
+      <input type="file" id="ch32bin" accept=".bin">
+      <button id="goch32" disabled>Auf Zielgerät schreiben</button>
+    </div>
+    <progress id="cbar" value="0" max="100" hidden></progress>
+    <p class="msg" id="cmsg"></p>
+    <p class="note" id="cnote"></p>
+  </section>
+
   <section>
     <h2>Verbindungsdaten der Konsole</h2>
     <dl>
@@ -426,6 +437,23 @@ async function poll(){
       "Neu starten: " + esc(tg.reset_how    || "\u2013") + "<br>" +
       "Bootmodus: "   + esc(tg.bootmode_how || "\u2013");
 
+    /*
+     * Der CH32V003-Bereich erscheint fuer rv003usb-Ziele. Geschrieben werden
+     * kann nur im Bootloader — die laufende Anwendung kennt das Protokoll
+     * nicht. Der Knopf bleibt deshalb gesperrt, und die Notiz sagt warum,
+     * statt den Anwender raten zu lassen.
+     */
+    const inBoot = tg.kind === "hid_bootloader";
+    const isRv003 = inBoot || (tg.kind === "hid" && tg.vid === "0x1209");
+    $("ch32sec").hidden = !isRv003;
+    if(isRv003){
+      $("goch32").disabled = !(inBoot && $("ch32bin").files.length);
+      $("cnote").textContent = inBoot
+        ? "Ziel steht im rv003usb-Bootloader und ist bereit. Geschrieben wird ab 0x08000000."
+        : "Ziel l\u00e4uft in seiner Anwendung. Erst \u201eIn den Bootmodus\u201c dr\u00fccken \u2014 "
+          + "das Flash-Protokoll gibt es nur im Bootloader.";
+    }
+
     const bootsel = s.target && s.target.kind === "bootsel";
     $("goflash").disabled = !(rp2040 && $("uf2").files.length);
     $("fnote").textContent = bootsel
@@ -630,6 +658,41 @@ $("goreset").addEventListener("click", () => {
 });
 $("gobootmode").addEventListener("click", () => {
   targetAction("/api/bootmode", "Bootmodus");
+});
+
+$("ch32bin").addEventListener("change", () => { poll(); });
+
+$("goch32").addEventListener("click", () => {
+  const f = $("ch32bin").files[0];
+  if(!f) return;
+  $("goch32").disabled = true;
+  $("cbar").hidden = false;
+  $("cmsg").className = "msg";
+  $("cmsg").textContent = "\u00fcbertrage " + f.size + " Bytes\u2026";
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/ch32/flash");
+  xhr.upload.onprogress = e => { if(e.lengthComputable) $("cbar").value = e.loaded/e.total*100; };
+  // Nach dem Upload laufen L\u00f6schen und Schreiben erst los.
+  xhr.upload.onload = () => { $("cmsg").textContent = "\u00fcbertragen, schreibe in den Flash\u2026"; };
+  xhr.onload = () => {
+    let r = {};
+    try { r = JSON.parse(xhr.responseText); } catch(e) {}
+    if(xhr.status === 200){
+      $("cmsg").className = "msg ok";
+      $("cmsg").textContent = "Geschrieben: " + r.written + " Bytes ab " + r.address
+                            + ". Mit \u201eNeu starten\u201c die Anwendung starten.";
+    }else{
+      $("cmsg").className = "msg err";
+      $("cmsg").textContent = "Abgelehnt: " + (r.error || xhr.responseText)
+                            + (r.written ? " (nach " + r.written + " Bytes)" : "");
+    }
+  };
+  xhr.onerror = () => {
+    $("cmsg").className = "msg err";
+    $("cmsg").textContent = "\u00dcbertragung abgebrochen.";
+  };
+  xhr.send(f);
 });
 
 $("goflash").addEventListener("click", () => {

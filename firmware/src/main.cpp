@@ -628,21 +628,7 @@ esp_err_t handleCh32(httpd_req_t* req)
                                      R"({"error":)" + jsonString(error) + "}");
     }
 
-    // Diagnose: die rohen Antwortbytes des letzten Lesevorgangs. Solange der
-    // Port nicht verifiziert ist, ist das die einzige ehrliche Auskunft.
-    std::string dump;
-    {
-        const std::vector<uint8_t>& r = link.lastResponse();
-        char b[4];
-        for (size_t i = 0; i < r.size() && i < 72; ++i)
-        {
-            snprintf(b, sizeof(b), "%02X", r[i]);
-            dump += b;
-        }
-    }
-
     std::string json = "{\"chip\":" + jsonString(info.name);
-    json += ",\"raw\":" + jsonString(dump);
     json += ",\"id_low\":" + hex32(info.idLow);
     json += ",\"id_high\":" + hex32(info.idHigh);
     json += ",\"read_protected\":" + std::string(info.readProtected ? "true" : "false");
