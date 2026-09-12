@@ -797,9 +797,15 @@ UsbTarget::ResetSupport UsbTarget::resetSupport(ResetMode mode) const
                 out.how      = "Ziel steht bereits im rv003usb-Bootloader";
                 return out;
             }
-            out.how = "Ziel steht im rv003usb-Bootloader. Zurueck in die Anwendung kommt "
-                      "es ueber minichlink - der Bootloader fuehrt nur hochgeladenen Code "
-                      "aus und kennt kein eigenes Boot-Kommando.";
+            /*
+             * Der Bootloader kennt kein eigenes Boot-Kommando — auch das
+             * kommt als hochgeladene Routine. Ausgefuehrt wird sie in
+             * `ch32_flasher`; hier wird nur gemeldet, dass es geht. Die
+             * Komponente haengt an `usb_target`, nicht umgekehrt, deshalb
+             * ruft der HTTP-Handler sie und nicht resetTarget().
+             */
+            out.possible = true;
+            out.how      = "rv003usb: Anwendungscode per hochgeladener Routine starten";
             return out;
 
         case Kind::Hid:
@@ -1019,9 +1025,10 @@ esp_err_t UsbTarget::hidGetFeature(uint8_t reportId, size_t length, std::string&
 }
 
 esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, size_t length,
-                                std::string& error)
+                                std::string& error, size_t* actual)
 {
     error.clear();
+    if (actual != nullptr) *actual = 0;
 
     if (m_hidIntf == PICOBOOT_NO_INTF)
     {
@@ -1148,11 +1155,23 @@ esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, 
                  reportId, static_cast<int>(xfer->status));
     }
 
-    if (!toDevice && data != nullptr && xfer->actual_num_bytes > 0)
+    /*
+     * `actual_num_bytes` zaehlt bei Steuertransfers das Setup-Paket mit. Die
+     * Nutzlaenge ist der Rest — und genau die braucht das Aushandeln der
+     * Scratchpad-Groesse: dort zaehlt, wie viel das Ziel wirklich liefert,
+     * nicht ob der Transfer geklappt hat.
+     */
+    size_t payload = 0;
+    if (xfer->actual_num_bytes > static_cast<int>(sizeof(usb_setup_packet_t)))
     {
-        const size_t got =
-            std::min(length, static_cast<size_t>(xfer->actual_num_bytes));
-        std::memcpy(data, xfer->data_buffer + sizeof(usb_setup_packet_t), got);
+        payload = static_cast<size_t>(xfer->actual_num_bytes) - sizeof(usb_setup_packet_t);
+        if (payload > length) payload = length;
+    }
+    if (actual != nullptr) *actual = payload;
+
+    if (!toDevice && data != nullptr && payload > 0)
+    {
+        std::memcpy(data, xfer->data_buffer + sizeof(usb_setup_packet_t), payload);
     }
 
     cleanup();

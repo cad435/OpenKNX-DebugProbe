@@ -238,7 +238,7 @@ public:
      * ueber einen zweiten. Beides sind Steuertransfers auf Endpunkt 0.
      */
     esp_err_t hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, size_t length,
-                         std::string& error);
+                         std::string& error, size_t* actual = nullptr);
 
     /// true, wenn ein HID-Interface gefunden wurde.
     bool hasHid() const { return m_hidIntf != PICOBOOT_NO_INTF; }

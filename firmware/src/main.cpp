@@ -544,6 +544,27 @@ esp_err_t handleTargetReset(httpd_req_t* req, UsbTarget::ResetMode mode)
     }
 
     std::string error;
+
+    /*
+     * Sonderfall CH32V003 im rv003usb-Bootloader: der Weg zurueck in die
+     * Anwendung laeuft ueber eine hochgeladene Routine, also ueber
+     * `ch32_flasher`. `UsbTarget` kann das nicht selbst erledigen — die
+     * Komponente haengt an ihm, nicht umgekehrt.
+     */
+    if (isRun && ctx->usb->device().kind == UsbTarget::Kind::HidBootloader)
+    {
+        B003Link link(*ctx->usb);
+        if (link.begin(error) == ESP_OK && link.bootUserCode(error) == ESP_OK)
+        {
+            ctx->bridge->note("Ziel: Anwendungscode gestartet");
+            return WebServer::sendJson(
+                req, R"({"status":"reset","method":"rv003usb: Anwendungscode gestartet"})");
+        }
+        ESP_LOGE(TAG, "rv003usb-Boot fehlgeschlagen: %s", error.c_str());
+        return WebServer::sendStatus(req, "502 Bad Gateway",
+                                     R"({"error":)" + jsonString(error) + "}");
+    }
+
     if (ctx->usb->resetTarget(mode, error) != ESP_OK)
     {
         ESP_LOGE(TAG, "%s nicht moeglich: %s", what, error.c_str());

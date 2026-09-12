@@ -42,6 +42,9 @@ public:
     static constexpr size_t DEFAULT_SCRATCHPAD = 128;
     static constexpr size_t DEFAULT_DATA_SIZE  = 64;
 
+    /// Groesster Scratchpad, den das Protokoll kennt.
+    static constexpr size_t MAX_SCRATCHPAD = 6272;
+
     explicit B003Link(UsbTarget& usb) : m_usb(usb) {}
 
     /// Prueft, ob ein rv003usb-Bootloader am USB haengt, und richtet die
@@ -70,6 +73,19 @@ public:
 
     esp_err_t identify(ChipInfo& info, std::string& error);
 
+    /**
+     * Startet den Anwendungscode des Ziels.
+     *
+     * Der Bootloader kennt kein eigenes „boot"-Kommando — auch das kommt als
+     * Routine. `run_app_blob` setzt die Option-Bytes zurueck und springt in den
+     * Anwendungsbereich.
+     *
+     * Danach ist das Geraet vom Bus weg, deshalb wird **nicht** auf eine
+     * Quittung gewartet: minichlink setzt hier `no_get_report`, und genau das
+     * macht diese Funktion auch.
+     */
+    esp_err_t bootUserCode(std::string& error);
+
     const std::vector<uint8_t>& lastResponse() const { return m_resp; }
 
     size_t scratchpadSize() const { return m_scratchpad; }
@@ -87,7 +103,7 @@ private:
      * @param sendLen  zusaetzliche Nutzdaten, die mitgehen
      * @param recvLen  erwartete Rueckdaten; 0 nutzt die kurze Statusabfrage
      */
-    esp_err_t commit(size_t sendLen, size_t recvLen, std::string& error);
+    esp_err_t commit(size_t sendLen, size_t recvLen, std::string& error, bool poll = true);
 
     /// Rundet auf die naechste vom Bootloader erwartete Reportgroesse.
     static size_t padSize(size_t needed);
