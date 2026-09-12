@@ -227,6 +227,23 @@ public:
     esp_err_t hidGetFeature(uint8_t reportId, size_t length, std::string& error);
 
     /**
+     * HID-Feature-Report in beide Richtungen, mit Nutzdaten.
+     *
+     * @param toDevice true = SET_REPORT (0x09), false = GET_REPORT (0x01)
+     * @param reportId Report-ID; steht bei hidapi-Konvention auch in data[0]
+     * @param data     Puffer, @p length Bytes, inklusive der Report-ID
+     *
+     * Das ist die Transportschicht des rv003usb-Bootloaders: minichlink
+     * schickt seinen Scratchpad als Feature-Report und pollt das Ergebnis
+     * ueber einen zweiten. Beides sind Steuertransfers auf Endpunkt 0.
+     */
+    esp_err_t hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, size_t length,
+                         std::string& error);
+
+    /// true, wenn ein HID-Interface gefunden wurde.
+    bool hasHid() const { return m_hidIntf != PICOBOOT_NO_INTF; }
+
+    /**
      * true, wenn das Ziel das PICOBOOT-Interface des RP2040-Boot-ROMs
      * anbietet. Nur dann gibt es aus dem BOOTSEL einen Weg zurueck in die
      * Anwendung, ohne ein UF2 zu schreiben.

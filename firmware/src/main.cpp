@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "OtaUpdater.hpp"
 #include "Rfc2217Server.hpp"
@@ -23,6 +24,7 @@
 #include "Uf2Flasher.hpp"
 #include "UsbTarget.hpp"
 #include "AssetStore.hpp"
+#include "B003Link.hpp"
 #include "WebServer.hpp"
 #include "WiFiManager.hpp"
 #include "esp_heap_caps.h"
@@ -579,6 +581,56 @@ esp_err_t handleTargetReset(httpd_req_t* req, UsbTarget::ResetMode mode)
 }
 
 /**
+ * GET /api/ch32 — Chip-Kennung eines CH32V003 im rv003usb-Bootloader.
+ *
+ * Erster Schritt des portierten minichlink-Protokolls: Transportschicht und
+ * Speicherlesen ueber eine im Ziel ausgefuehrte RISC-V-Routine. Flashen kommt
+ * darauf auf.
+ */
+esp_err_t handleCh32(httpd_req_t* req)
+{
+    auto* ctx = static_cast<AppContext*>(req->user_ctx);
+
+    B003Link    link(*ctx->usb);
+    std::string error;
+
+    if (link.begin(error) != ESP_OK)
+    {
+        return WebServer::sendStatus(req, "409 Conflict",
+                                     R"({"error":)" + jsonString(error) + "}");
+    }
+
+    B003Link::ChipInfo info;
+    if (link.identify(info, error) != ESP_OK)
+    {
+        return WebServer::sendStatus(req, "502 Bad Gateway",
+                                     R"({"error":)" + jsonString(error) + "}");
+    }
+
+    // Diagnose: die rohen Antwortbytes des letzten Lesevorgangs. Solange der
+    // Port nicht verifiziert ist, ist das die einzige ehrliche Auskunft.
+    std::string dump;
+    {
+        const std::vector<uint8_t>& r = link.lastResponse();
+        char b[4];
+        for (size_t i = 0; i < r.size() && i < 72; ++i)
+        {
+            snprintf(b, sizeof(b), "%02X", r[i]);
+            dump += b;
+        }
+    }
+
+    std::string json = "{\"chip\":" + jsonString(info.name);
+    json += ",\"raw\":" + jsonString(dump);
+    json += ",\"id_low\":" + hex32(info.idLow);
+    json += ",\"id_high\":" + hex32(info.idHigh);
+    json += ",\"read_protected\":" + std::string(info.readProtected ? "true" : "false");
+    json += ",\"scratchpad\":" + std::to_string(link.scratchpadSize());
+    json += "}";
+    return WebServer::sendJson(req, json);
+}
+
+/**
  * POST /api/reset — Ziel neu starten, Anwendung laeuft an.
  *
  * Geht nicht bei jedem Ziel. Ein RP2040 mit nativem USB hat keine
@@ -909,6 +961,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_POST, &handleConsoleSend, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_GET, &handleConsole, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/snippet", HTTP_GET, &handleSnippet, &g_ctx));
+    ESP_ERROR_CHECK(web.on("/api/ch32", HTTP_GET, &handleCh32, &g_ctx));
     ota.registerRoutes(web);
 
     // Decides between joining the stored network and opening the setup portal;

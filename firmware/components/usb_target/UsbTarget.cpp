@@ -70,6 +70,7 @@ constexpr uint32_t PICOBOOT_TIMEOUT_MS = 1000;
  * Steuertransfer ueber Endpunkt 0 — dafuer braucht es keinen HID-Treiber.
  */
 constexpr uint8_t  HID_REQ_GET_REPORT = 0x01;
+constexpr uint8_t  HID_REQ_SET_REPORT = 0x09;
 constexpr uint16_t HID_REPORT_FEATURE = 0x03;
 
 /// VID von pid.codes. Der rv003usb-Bootloader meldet sich darunter.
@@ -925,6 +926,12 @@ void UsbTarget::findHid(usb_device_handle_t handle)
 
 esp_err_t UsbTarget::hidGetFeature(uint8_t reportId, size_t length, std::string& error)
 {
+    return hidFeature(false, reportId, nullptr, length, error);
+}
+
+esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, size_t length,
+                                std::string& error)
+{
     error.clear();
 
     if (m_hidIntf == PICOBOOT_NO_INTF)
@@ -975,12 +982,19 @@ esp_err_t UsbTarget::hidGetFeature(uint8_t reportId, size_t length, std::string&
     }
 
     auto* setup          = reinterpret_cast<usb_setup_packet_t*>(xfer->data_buffer);
-    setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_CLASS |
-                           USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
-    setup->bRequest      = HID_REQ_GET_REPORT;
+    setup->bmRequestType = (toDevice ? USB_BM_REQUEST_TYPE_DIR_OUT : USB_BM_REQUEST_TYPE_DIR_IN) |
+                           USB_BM_REQUEST_TYPE_TYPE_CLASS | USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
+    setup->bRequest      = toDevice ? HID_REQ_SET_REPORT : HID_REQ_GET_REPORT;
     setup->wValue        = static_cast<uint16_t>((HID_REPORT_FEATURE << 8) | reportId);
     setup->wIndex        = intf;
     setup->wLength       = static_cast<uint16_t>(length);
+
+    // hidapi-Konvention: bei einer Report-ID != 0 geht der ganze Puffer raus,
+    // die ID eingeschlossen. Genau so erwartet es der Bootloader.
+    if (toDevice && data != nullptr)
+    {
+        std::memcpy(xfer->data_buffer + sizeof(usb_setup_packet_t), data, length);
+    }
 
     xfer->device_handle    = device;
     xfer->bEndpointAddress = 0;
@@ -1026,6 +1040,13 @@ esp_err_t UsbTarget::hidGetFeature(uint8_t reportId, size_t length, std::string&
         }
         ESP_LOGW(TAG, "HID-Feature 0x%02X: Status %d - Ziel startet vermutlich neu",
                  reportId, static_cast<int>(xfer->status));
+    }
+
+    if (!toDevice && data != nullptr && xfer->actual_num_bytes > 0)
+    {
+        const size_t got =
+            std::min(length, static_cast<size_t>(xfer->actual_num_bytes));
+        std::memcpy(data, xfer->data_buffer + sizeof(usb_setup_packet_t), got);
     }
 
     cleanup();
