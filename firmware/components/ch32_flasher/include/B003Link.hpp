@@ -56,6 +56,12 @@ public:
 
     esp_err_t readWord(uint32_t address, uint32_t& value, std::string& error);
 
+    esp_err_t writeWord(uint32_t address, uint32_t value, std::string& error);
+
+    /// Schreibt in RAM oder Peripherie — **nicht** in den Flash, dafuer gibt
+    /// es flashImage().
+    esp_err_t writeBlob(uint32_t address, const uint8_t* data, size_t size, std::string& error);
+
     /**
      * Chip-Kennung des Ziels.
      *
@@ -86,6 +92,26 @@ public:
      */
     esp_err_t bootUserCode(std::string& error);
 
+    /**
+     * Schreibt ein Abbild in den Flash des Ziels.
+     *
+     * @param address  Startadresse, ueblich `0x08000000`
+     * @param written  Zahl der geschriebenen Bytes, auch im Fehlerfall gesetzt
+     *
+     * Gearbeitet wird in 64-Byte-Bloecken — das ist die Sektorgroesse des
+     * CH32V003 und zugleich das, was mit Routine und Parametern noch in einen
+     * 128-Byte-Scratchpad passt (4 + 48 + 8 + 64 + 4 = 128, exakt voll).
+     *
+     * Vor jedem Block wird geloescht. Das ist langsamer als Buch zu fuehren,
+     * welche Sektoren schon leer sind, aber es kann nicht falsch sein — und
+     * ein halb beschriebener Flash waere hier der teuerste Fehler.
+     */
+    esp_err_t flashImage(uint32_t address, const uint8_t* data, size_t size,
+                         std::string& error, size_t& written);
+
+    /// Liegt die Adresse im Flash (und nicht im RAM oder in der Peripherie)?
+    static bool isFlashAddress(uint32_t address);
+
     const std::vector<uint8_t>& lastResponse() const { return m_resp; }
 
     size_t scratchpadSize() const { return m_scratchpad; }
@@ -105,6 +131,15 @@ private:
      */
     esp_err_t commit(size_t sendLen, size_t recvLen, std::string& error, bool poll = true);
 
+    /// Entsperrt den Flash-Controller, falls noch gesperrt.
+    esp_err_t unlockFlash(std::string& error);
+
+    /// Loescht @p len Bytes ab @p address, sektorweise.
+    esp_err_t eraseBlock(uint32_t address, uint32_t len, std::string& error);
+
+    /// Schreibt genau 64 Byte in den Flash. Loescht den Sektor vorher.
+    esp_err_t writeFlash64(uint32_t address, const uint8_t* data, std::string& error);
+
     /// Rundet auf die naechste vom Bootloader erwartete Reportgroesse.
     static size_t padSize(size_t needed);
 
@@ -112,6 +147,7 @@ private:
     std::vector<uint8_t> m_cmd;
     std::vector<uint8_t> m_resp;
     size_t               m_place {0};
+    bool                 m_flashUnlocked {false};
     size_t               m_scratchpad {DEFAULT_SCRATCHPAD};
     size_t               m_dataSize {DEFAULT_DATA_SIZE};
 };

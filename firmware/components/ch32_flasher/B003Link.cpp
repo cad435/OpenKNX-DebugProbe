@@ -96,6 +96,57 @@ const uint8_t RUN_APP_BLOB[] = {
     0x01, 0x13, 0x07, 0x00, 0x08, 0x23, 0xa0, 0xe7, 0x00, 0xb7, 0xf7, 0x00, 0xe0, 0x93,
     0x87, 0x07, 0xd1, 0x37, 0x07, 0x00, 0x80, 0x23, 0xa0, 0xe7, 0x00};
 
+/*
+ * Schreibt wortweise in den Adressraum des Ziels. Gegenstueck zu
+ * `word_wise_read_blob`: Adresse und Laenge stehen in den Parametern, die
+ * Daten liegen dahinter bei Offset 60.
+ */
+const uint8_t WORD_WISE_WRITE_BLOB[] = {
+    0x23, 0xa0, 0x05, 0x00, 0x13, 0x07, 0x45, 0x03, 0x0c, 0x43, 0x50, 0x43,
+    0x2e, 0x96, 0x21, 0x07, 0x14, 0x43, 0x94, 0xc1, 0x91, 0x05, 0x11, 0x07,
+    0xe3, 0xcc, 0xc5, 0xfe, 0x93, 0x06, 0xf0, 0xff, 0x14, 0xc1, 0x82, 0x80,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+/*
+ * Schreibt 64 Byte in den Flash und wartet im Ziel auf das Ende des
+ * Programmiervorgangs. Braucht die Basisadresse von FLASH->STATR als zweiten
+ * Parameter, weil es dort pollt.
+ */
+const uint8_t WRITE64_FLASH_BLOB[] = {
+    0x13, 0x07, 0x45, 0x03, 0x0c, 0x43, 0x13, 0x86, 0x05, 0x04, 0x5c, 0x43,
+    0x8c, 0xc7, 0x14, 0x47, 0x94, 0xc1, 0xb7, 0x06, 0x05, 0x00, 0xd4, 0xc3,
+    0x94, 0x41, 0x91, 0x05, 0x11, 0x07, 0xe3, 0xc8, 0xc5, 0xfe, 0xc1, 0x66,
+    0x93, 0x86, 0x06, 0x04, 0xd4, 0xc3, 0xfd, 0x56, 0x14, 0xc1, 0x82, 0x80};
+
+/// Loescht sektorweise. Dritter Parameter packt Sektorgroesse und Laenge.
+const uint8_t ERASE_BLOCK_BLOB[] = {
+    0x13, 0x07, 0x85, 0x03, 0x0c, 0x43, 0x5c, 0x43, 0x83, 0x12, 0x87, 0x00,
+    0x03, 0x16, 0xa7, 0x00, 0x2e, 0x96, 0xb7, 0x06, 0x02, 0x00, 0xd4, 0xc3,
+    0x93, 0x86, 0x06, 0x04, 0x8c, 0xc7, 0xd4, 0xc3, 0x98, 0x43, 0x05, 0x8b,
+    0x75, 0xff, 0x96, 0x95, 0xe3, 0xca, 0xc5, 0xfe, 0xfd, 0x56, 0x14, 0xc1,
+    0x01, 0x00, 0x82, 0x80};
+
+/*
+ * Flash-Controller des CH32V003. Werte aus `ch32v003fun.h` (FLASH_CTLR_*) und
+ * `InternalUnlockFlash()` in `minichlink.c`.
+ */
+constexpr uint32_t ADDR_FLASH_KEYR     = 0x40022004u;
+constexpr uint32_t ADDR_FLASH_OBKEYR   = 0x40022008u;
+constexpr uint32_t ADDR_FLASH_CTLR     = 0x40022010u;
+constexpr uint32_t ADDR_FLASH_MODEKEYR = 0x40022024u;
+
+constexpr uint32_t FLASH_KEY1 = 0x45670123u;
+constexpr uint32_t FLASH_KEY2 = 0xCDEF89ABu;
+
+/// Beide Sperrbits (LOCK 0x80 und FLOCK 0x8000) auf einmal abgefragt.
+constexpr uint32_t FLASH_LOCK_MASK = 0x8080u;
+
+constexpr uint32_t CR_PAGE_PG = 0x00010000u;  ///< FTPG, schnelles Programmieren
+constexpr uint32_t CR_BUF_RST = 0x00080000u;  ///< Schreibpuffer zuruecksetzen
+
+/// Sektorgroesse des CH32V003. Zugleich die Blockgroesse beim Schreiben.
+constexpr uint32_t SECTOR_SIZE = 64;
+
 /// Adressen der Kennungsregister der CH32V-Familie (aus `B003DetermineChipType`).
 constexpr uint32_t ADDR_FLASH_STATR = 0x4002200Cu;
 constexpr uint32_t ADDR_OBR         = 0x4002201Cu;
@@ -369,6 +420,196 @@ esp_err_t B003Link::readWord(uint32_t address, uint32_t& value, std::string& err
     const esp_err_t err = readBlob(address, sizeof(buf), buf, error);
     if (err != ESP_OK) return err;
     std::memcpy(&value, buf, 4);
+    return ESP_OK;
+}
+
+bool B003Link::isFlashAddress(uint32_t address)
+{
+    // Beim CH32V003 ist der Flash bei 0x08000000 eingeblendet und zusaetzlich
+    // ab 0x00000000 gespiegelt.
+    const uint32_t top = address & 0xFF000000u;
+    return top == 0x08000000u || top == 0x00000000u;
+}
+
+esp_err_t B003Link::writeBlob(uint32_t address, const uint8_t* data, size_t size,
+                              std::string& error)
+{
+    error.clear();
+
+    if ((address & 3) != 0 || (size & 3) != 0)
+    {
+        error = "nur wortweises Schreiben umgesetzt - Adresse und Laenge muessen durch 4 teilbar sein";
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    while (size > 0)
+    {
+        size_t chunk = std::min(size, m_dataSize);
+        chunk &= ~static_cast<size_t>(3);
+        if (chunk == 0) break;
+
+        resetOp();
+        writeOpArb(WORD_WISE_WRITE_BLOB, sizeof(WORD_WISE_WRITE_BLOB));
+        writeOp4(address);
+        writeOp4(static_cast<uint32_t>(chunk));
+
+        // Nutzdaten hinter die Parameter, also bei m_place (Offset 60).
+        std::memcpy(m_cmd.data() + m_place, data, chunk);
+
+        const esp_err_t err = commit(chunk, 0, error);
+        if (err != ESP_OK) return err;
+
+        data += chunk;
+        address += static_cast<uint32_t>(chunk);
+        size -= chunk;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t B003Link::writeWord(uint32_t address, uint32_t value, std::string& error)
+{
+    uint8_t buf[4];
+    std::memcpy(buf, &value, 4);
+    return writeBlob(address, buf, sizeof(buf), error);
+}
+
+esp_err_t B003Link::unlockFlash(std::string& error)
+{
+    if (m_flashUnlocked) return ESP_OK;
+
+    uint32_t ctlr = 0;
+    esp_err_t err = readWord(ADDR_FLASH_CTLR, ctlr, error);
+    if (err != ESP_OK) return err;
+
+    if ((ctlr & FLASH_LOCK_MASK) == 0)
+    {
+        m_flashUnlocked = true;
+        return ESP_OK;
+    }
+
+    /*
+     * Drei Schluesselpaare, jeweils KEY1 dann KEY2. KEYR gibt den Flash frei,
+     * OBKEYR die Option-Bytes, MODEKEYR den schnellen Programmiermodus — den
+     * braucht `write64_flash`. Reihenfolge und Adressen aus
+     * InternalUnlockFlash() in minichlink.c.
+     */
+    const uint32_t regs[] = {ADDR_FLASH_KEYR, ADDR_FLASH_OBKEYR, ADDR_FLASH_MODEKEYR};
+    for (uint32_t reg : regs)
+    {
+        err = writeWord(reg, FLASH_KEY1, error);
+        if (err != ESP_OK) return err;
+        err = writeWord(reg, FLASH_KEY2, error);
+        if (err != ESP_OK) return err;
+    }
+
+    err = readWord(ADDR_FLASH_CTLR, ctlr, error);
+    if (err != ESP_OK) return err;
+
+    if ((ctlr & FLASH_LOCK_MASK) != 0)
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(ctlr));
+        error = std::string("Flash liess sich nicht entsperren (CTLR = ") + buf + ")";
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Flash entsperrt");
+    m_flashUnlocked = true;
+    return ESP_OK;
+}
+
+esp_err_t B003Link::eraseBlock(uint32_t address, uint32_t len, std::string& error)
+{
+    resetOp();
+    writeOpArb(ERASE_BLOCK_BLOB, sizeof(ERASE_BLOCK_BLOB));
+    writeOp4(address);
+    writeOp4(ADDR_FLASH_STATR);
+    // Untere Haelfte Sektorgroesse, obere Haelfte die zu loeschende Laenge.
+    writeOp4(SECTOR_SIZE | (len << 16));
+    return commit(0, 0, error);
+}
+
+esp_err_t B003Link::writeFlash64(uint32_t address, const uint8_t* data, std::string& error)
+{
+    esp_err_t err = eraseBlock(address, SECTOR_SIZE, error);
+    if (err != ESP_OK)
+    {
+        error = "Loeschen fehlgeschlagen (" + error + ")";
+        return err;
+    }
+
+    // Schreibpuffer des Controllers leeren, sonst landet Altes mit im Sektor.
+    err = writeWord(ADDR_FLASH_CTLR, CR_PAGE_PG, error);
+    if (err != ESP_OK) return err;
+    err = writeWord(ADDR_FLASH_CTLR, CR_PAGE_PG | CR_BUF_RST, error);
+    if (err != ESP_OK) return err;
+
+    resetOp();
+    writeOpArb(WRITE64_FLASH_BLOB, sizeof(WRITE64_FLASH_BLOB));
+    writeOp4(address);
+    writeOp4(ADDR_FLASH_STATR);  // dort pollt die Routine auf "fertig"
+    std::memcpy(m_cmd.data() + m_place, data, SECTOR_SIZE);
+
+    return commit(SECTOR_SIZE, 0, error);
+}
+
+esp_err_t B003Link::flashImage(uint32_t address, const uint8_t* data, size_t size,
+                               std::string& error, size_t& written)
+{
+    error.clear();
+    written = 0;
+
+    if (size == 0)
+    {
+        error = "leeres Abbild";
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!isFlashAddress(address))
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(address));
+        error = std::string("Adresse ") + buf + " liegt nicht im Flash";
+        return ESP_ERR_INVALID_ARG;
+    }
+    if ((address % SECTOR_SIZE) != 0)
+    {
+        error = "Startadresse muss auf einer 64-Byte-Grenze liegen";
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = unlockFlash(error);
+    if (err != ESP_OK) return err;
+
+    ESP_LOGI(TAG, "schreibe %u Byte ab 0x%08lX", static_cast<unsigned>(size),
+             static_cast<unsigned long>(address));
+
+    uint8_t block[SECTOR_SIZE];
+    while (written < size)
+    {
+        const size_t chunk = std::min(size - written, static_cast<size_t>(SECTOR_SIZE));
+
+        /*
+         * Der letzte Block wird mit 0xFF aufgefuellt. Das ist der Zustand von
+         * geloeschtem Flash, also genau das, was ohnehin dort stuende.
+         */
+        std::memset(block, 0xFF, sizeof(block));
+        std::memcpy(block, data + written, chunk);
+
+        err = writeFlash64(static_cast<uint32_t>(address + written), block, error);
+        if (err != ESP_OK)
+        {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "0x%08lX",
+                     static_cast<unsigned long>(address + written));
+            error = std::string("bei ") + buf + ": " + error;
+            return err;
+        }
+
+        written += chunk;
+    }
+
+    ESP_LOGI(TAG, "%u Byte geschrieben", static_cast<unsigned>(written));
     return ESP_OK;
 }
 

@@ -652,6 +652,83 @@ esp_err_t handleCh32(httpd_req_t* req)
 }
 
 /**
+ * POST /api/ch32/flash — Abbild in den Flash eines CH32V003 schreiben.
+ *
+ * Body ist die rohe `.bin`, Startadresse `?addr=` (Standard 0x08000000).
+ * Das Ziel muss im rv003usb-Bootloader stehen; `/api/bootmode` bringt es
+ * dorthin.
+ */
+esp_err_t handleCh32Flash(httpd_req_t* req)
+{
+    auto* ctx = static_cast<AppContext*>(req->user_ctx);
+
+    uint32_t address = 0x08000000u;
+    char     query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        char value[24];
+        if (httpd_query_key_value(query, "addr", value, sizeof(value)) == ESP_OK)
+        {
+            address = static_cast<uint32_t>(strtoul(value, nullptr, 0));
+        }
+    }
+
+    const size_t total = static_cast<size_t>(req->content_len);
+    if (total == 0)
+    {
+        return WebServer::sendStatus(req, "400 Bad Request", R"({"error":"leerer Body"})");
+    }
+    // 16 KB Flash beim CH32V003; mehr kann nicht gemeint sein.
+    if (total > 16 * 1024)
+    {
+        return WebServer::sendStatus(req, "413 Payload Too Large",
+                                     R"({"error":"groesser als der Flash des CH32V003"})");
+    }
+
+    std::vector<uint8_t> image(total);
+    size_t               got = 0;
+    while (got < total)
+    {
+        const int r = httpd_req_recv(req, reinterpret_cast<char*>(image.data() + got),
+                                     total - got);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0)
+        {
+            return WebServer::sendStatus(req, "400 Bad Request",
+                                         R"({"error":"Uebertragung abgebrochen"})");
+        }
+        got += static_cast<size_t>(r);
+    }
+
+    B003Link    link(*ctx->usb);
+    std::string error;
+    if (link.begin(error) != ESP_OK)
+    {
+        return WebServer::sendStatus(req, "409 Conflict",
+                                     R"({"error":)" + jsonString(error) + "}");
+    }
+
+    ctx->bridge->note("CH32V003: Flashen gestartet");
+
+    size_t          written = 0;
+    const esp_err_t err     = link.flashImage(address, image.data(), image.size(), error, written);
+    if (err != ESP_OK)
+    {
+        ctx->bridge->note("CH32V003: Flashen fehlgeschlagen");
+        ESP_LOGE(TAG, "CH32-Flash fehlgeschlagen nach %u Byte: %s",
+                 static_cast<unsigned>(written), error.c_str());
+        return WebServer::sendStatus(req, "502 Bad Gateway",
+                                     R"({"error":)" + jsonString(error) +
+                                         ",\"written\":" + std::to_string(written) + "}");
+    }
+
+    ctx->bridge->note("CH32V003: Flashen fertig");
+    std::string json = "{\"status\":\"ok\",\"written\":" + std::to_string(written);
+    json += ",\"address\":" + hex32(address) + "}";
+    return WebServer::sendJson(req, json);
+}
+
+/**
  * POST /api/reset — Ziel neu starten, Anwendung laeuft an.
  *
  * Geht nicht bei jedem Ziel. Ein RP2040 mit nativem USB hat keine
@@ -983,6 +1060,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_GET, &handleConsole, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/snippet", HTTP_GET, &handleSnippet, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/ch32", HTTP_GET, &handleCh32, &g_ctx));
+    ESP_ERROR_CHECK(web.on("/api/ch32/flash", HTTP_POST, &handleCh32Flash, &g_ctx));
     ota.registerRoutes(web);
 
     // Decides between joining the stored network and opening the setup portal;

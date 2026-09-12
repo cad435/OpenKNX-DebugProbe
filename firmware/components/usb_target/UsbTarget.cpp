@@ -999,6 +999,30 @@ void UsbTarget::findPicoboot(usb_device_handle_t handle)
     }
 }
 
+esp_err_t UsbTarget::claimInterface(usb_device_handle_t device, uint8_t intf)
+{
+    const esp_err_t err = usb_host_interface_claim(m_client, device, intf, 0);
+    if (err == ESP_OK) m_claimedIntf.store(intf);
+    return err;
+}
+
+void UsbTarget::releaseClaimed(usb_device_handle_t device)
+{
+    /*
+     * Ohne Ruecksicht darauf, ob m_device noch dasselbe ist. Der Handle bleibt
+     * gueltig, bis usb_host_device_close() ihn schliesst — und genau das
+     * scheitert, solange ein Interface belegt ist.
+     */
+    const uint8_t intf = m_claimedIntf.exchange(PICOBOOT_NO_INTF);
+    if (intf == PICOBOOT_NO_INTF) return;
+
+    const esp_err_t err = usb_host_interface_release(m_client, device, intf);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Interface %u nicht freigegeben: %s", intf, esp_err_to_name(err));
+    }
+}
+
 void UsbTarget::findHid(usb_device_handle_t handle)
 {
     m_hidIntf = PICOBOOT_NO_INTF;
@@ -1045,7 +1069,7 @@ esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, 
 
     const uint8_t intf = m_hidIntf;
 
-    esp_err_t err = usb_host_interface_claim(m_client, device, intf, 0);
+    esp_err_t err = claimInterface(device, intf);
     if (err != ESP_OK)
     {
         error = std::string("HID-Interface nicht belegbar: ") + esp_err_to_name(err);
@@ -1062,7 +1086,7 @@ esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, 
      * auf einen toten Handle.
      */
     auto cleanup = [&]() {
-        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        releaseClaimed(device);
         ctrlWaitFree(w);
         w = nullptr;
     };
@@ -1131,7 +1155,7 @@ esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, 
          */
         ESP_LOGW(TAG, "HID-Feature 0x%02X: keine Quittung - Ziel startet vermutlich neu",
                  reportId);
-        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        releaseClaimed(device);
         return ESP_OK;
     }
 
@@ -1197,7 +1221,7 @@ esp_err_t UsbTarget::picobootReboot(std::string& error)
 
     const uint8_t intf = m_picobootIntf;
 
-    esp_err_t err = usb_host_interface_claim(m_client, device, intf, 0);
+    esp_err_t err = claimInterface(device, intf);
     if (err != ESP_OK)
     {
         error = std::string("PICOBOOT-Interface nicht belegbar: ") + esp_err_to_name(err);
@@ -1214,7 +1238,7 @@ esp_err_t UsbTarget::picobootReboot(std::string& error)
      * auf einen toten Handle.
      */
     auto cleanup = [&]() {
-        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        releaseClaimed(device);
         ctrlWaitFree(w);
         w = nullptr;
     };
@@ -1325,7 +1349,7 @@ esp_err_t UsbTarget::picobootReboot(std::string& error)
     {
         // Abgegeben — `xfer` gehoert jetzt dem Callback, Finger weg.
         ESP_LOGW(TAG, "PICOBOOT: keine Quittung - Ziel startet vermutlich schon neu");
-        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        releaseClaimed(device);
         return ESP_OK;
     }
 
@@ -1776,5 +1800,14 @@ void UsbTarget::onDeviceGone(usb_device_handle_t handle)
     m_picobootEpIn  = 0;
     m_hidIntf       = PICOBOOT_NO_INTF;
 
-    usb_host_device_close(m_client, handle);
+    // MUSS vor dem Schliessen passieren, sonst bleibt das Geraeteobjekt liegen
+    // und an der Adresse enumeriert nichts mehr.
+    releaseClaimed(handle);
+
+    const esp_err_t closeErr = usb_host_device_close(m_client, handle);
+    if (closeErr != ESP_OK)
+    {
+        // Nicht verschlucken: genau hier haengt sonst still der USB-Stack.
+        ESP_LOGE(TAG, "usb_host_device_close fehlgeschlagen: %s", esp_err_to_name(closeErr));
+    }
 }

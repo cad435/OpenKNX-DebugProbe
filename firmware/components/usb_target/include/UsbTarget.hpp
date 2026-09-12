@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 
 #include "esp_err.h"
@@ -344,6 +345,26 @@ private:
 
     uint8_t m_picobootIntf {PICOBOOT_NO_INTF};
     uint8_t m_hidIntf {PICOBOOT_NO_INTF};  ///< derselbe Sentinel
+
+    /**
+     * Das aktuell belegte Interface, oder PICOBOOT_NO_INTF.
+     *
+     * Muss ueber den Aufruf hinaus bekannt sein: verschwindet das Ziel
+     * mitten in einem Transfer, raeumt `onDeviceGone()` auf — und
+     * `usb_host_device_close()` scheitert, solange noch ein Interface belegt
+     * ist. Das Geraeteobjekt bliebe dann liegen und an der Adresse wuerde
+     * nichts mehr enumerieren: der USB-Stack der Probe haengt.
+     *
+     * `atomic`, weil Freigabe aus zwei Tasks kommen kann (HTTP-Handler und
+     * USB-Client-Task). Wer zuerst tauscht, gibt frei.
+     */
+    std::atomic<uint8_t> m_claimedIntf {PICOBOOT_NO_INTF};
+
+    /// Belegt @p intf und merkt es sich.
+    esp_err_t claimInterface(usb_device_handle_t device, uint8_t intf);
+
+    /// Gibt ein gemerktes Interface frei. Mehrfachaufruf ist harmlos.
+    void releaseClaimed(usb_device_handle_t device);
     uint8_t m_picobootEpOut {0};
     uint8_t m_picobootEpIn {0};
 
