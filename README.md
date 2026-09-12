@@ -58,6 +58,47 @@ the target. The line ending is selectable (CR, LF, CRLF, none), because the Open
 works character by character while other firmware waits for a complete line. ↑/↓ steps
 through recently sent commands.
 
+## Supported targets and their USB IDs
+
+**Read the caveat before the table.** On targets with native USB, the VID:PID of the
+*running application* is chosen by its firmware, not by the chip. The values below are the
+common defaults, not a guarantee. Only the **bootloader** IDs are fixed — they live in the
+boot ROM or in a bootloader that is flashed once and then left alone.
+
+That asymmetry is why the probe identifies bootloaders by VID:PID and applications by their
+USB class: the first is reliable, the second is not.
+
+| Target | Application (typical) | Bootloader / download | How the probe gets there |
+|---|---|---|---|
+| RP2040 (arduino-pico) | `2E8A:00C0` | `2E8A:0003` RPI-RP2, mass storage | 1200-baud touch |
+| RP2040 (pico-sdk) | `2E8A:000A`, `2E8A:0009` | `2E8A:0003` | 1200-baud touch |
+| ESP32-S3 / -C3, native USB | `303A:1001` | **same IDs** — the ROM uses the same USB-Serial-JTAG | DTR/RTS sequence with boot latch |
+| ESP32-S2, native USB | `303A:0002`, `303A:1000` | `303A:0002` | DTR/RTS sequence |
+| Any board behind a UART bridge | the bridge chip, see below | **unchanged** — the bridge stays visible either way | DTR/RTS on IO0 and EN |
+| CH32V003 with rv003usb | firmware's choice (`1209:D003` in the example) | `1209:B003` | HID feature report `0xAB` |
+| STM32 with ROM DFU | firmware's choice (`0483:5740` for ST's VCP) | `0483:DF11` | BOOT0 high at reset — **no software path** |
+
+UART bridges, for completeness — these never change between application and bootloader,
+because the mode is selected with DTR/RTS rather than by re-enumerating:
+
+`1A86:7523` CH340 · `1A86:5523` CH341 · `1A86:55D3` CH343 · `1A86:55D4` CH9102 ·
+`10C4:EA60` CP2102 · `10C4:EA70` CP2105 · `10C4:EA71` CP2108 · `0403:6001` FT232R ·
+`0403:6010` FT2232 · `0403:6014` FT232H · `0403:6015` FT230X · `067B:2303` PL2303
+
+### What the probe can do with each
+
+| Target | Console | Flash | Restart into the application | Into the bootloader |
+|---|---|---|---|---|
+| RP2040 | yes | UF2 over `/api/flash` | PICOBOOT, from BOOTSEL only | yes |
+| ESP32, native USB | yes | esptool over RFC2217 | yes | yes |
+| ESP32 behind a bridge | yes | esptool over RFC2217 | yes | yes |
+| CH32V003 (rv003usb) | — | in progress | not yet | yes |
+| STM32 ROM DFU | — | not implemented | — | press BOOT0 yourself |
+
+A running RP2040 cannot be reset over the cable — native USB has no reset line, and
+PICOBOOT only exists in the boot ROM. Bootmode followed by reset gets there anyway, via the
+boot ROM.
+
 ## Status LED
 
 The module's RGB LED (WS2812 on GPIO48) shows the operating state. Highest urgency wins —
