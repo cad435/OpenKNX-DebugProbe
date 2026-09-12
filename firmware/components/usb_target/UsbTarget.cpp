@@ -178,6 +178,79 @@ const char* speedName(usb_speed_t speed)
     }
 }
 
+
+/**
+ * Wartekontext eines Steuertransfers — und der Grund, warum er ueberlebt.
+ *
+ * Laeuft ein Transfer in die Zeitueberschreitung, ist er damit **nicht**
+ * abgebrochen: er kann jederzeit noch fertig werden, und dann ruft der
+ * USB-Client-Task den Callback auf. Wer in diesem Moment Semaphore und
+ * Transfer schon freigegeben hat, faehrt eine Use-after-free.
+ *
+ * Genau das ist hier der Normalfall und nicht der Sonderfall: ein Ziel, das
+ * auf den Bootmodus-Report hin neu startet, reisst den laufenden Transfer ab.
+ * Der erste Aufruf hinterliess so eine Zeitbombe, der zweite zuendete sie —
+ * der USB-Stack der Probe stuerzte ab.
+ *
+ * Jetzt gilt: wer zuletzt da ist, raeumt auf. `done` und `abandoned` werden
+ * unter einem Spinlock gesetzt, damit genau einer von beiden freigibt.
+ */
+struct CtrlWait
+{
+    SemaphoreHandle_t sem {nullptr};
+    usb_transfer_t*   xfer {nullptr};
+    portMUX_TYPE      lock = portMUX_INITIALIZER_UNLOCKED;
+    bool              done {false};       ///< Callback war schon da
+    bool              abandoned {false};  ///< der Wartende hat aufgegeben
+};
+
+/// Scharf machen vor jedem Absenden. Noetig, weil picobootReboot() denselben
+/// Transfer zweimal benutzt — ein stehengebliebenes `done` aus dem ersten
+/// Durchgang wuerde den zweiten faelschlich als fertig melden.
+void ctrlWaitArm(CtrlWait* w)
+{
+    if (w == nullptr) return;
+    portENTER_CRITICAL(&w->lock);
+    w->done = false;
+    portEXIT_CRITICAL(&w->lock);
+}
+
+/**
+ * Wartet auf den Abschluss und regelt dabei, wer aufraeumt.
+ *
+ * @return true, wenn der Transfer durch ist und der Aufrufer @p w weiter
+ *         besitzt. Bei false ist die Zeit abgelaufen und der Kontext an den
+ *         Callback uebergeben; @p w steht dann auf nullptr und darf nicht mehr
+ *         angefasst werden.
+ */
+bool waitForCtrl(CtrlWait*& w, uint32_t timeoutMs)
+{
+    if (w == nullptr) return false;
+
+    if (xSemaphoreTake(w->sem, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) return true;
+
+    bool cbDone;
+    portENTER_CRITICAL(&w->lock);
+    cbDone = w->done;
+    if (!cbDone) w->abandoned = true;
+    portEXIT_CRITICAL(&w->lock);
+
+    // Knapp verpasst: der Callback war schon durch, hat aber nicht aufgeraeumt,
+    // weil `abandoned` da noch false stand. Dann gehoert der Kontext uns.
+    if (cbDone) return true;
+
+    w = nullptr;  // abgegeben
+    return false;
+}
+
+void ctrlWaitFree(CtrlWait* w)
+{
+    if (w == nullptr) return;
+    if (w->xfer != nullptr) usb_host_transfer_free(w->xfer);
+    if (w->sem != nullptr) vSemaphoreDelete(w->sem);
+    delete w;
+}
+
 }  // namespace
 
 UsbTarget::~UsbTarget()
@@ -848,8 +921,24 @@ esp_err_t UsbTarget::jtagReset(ResetMode mode)
 void UsbTarget::picobootXferCb(usb_transfer_t* xfer)
 {
     // Laeuft im clientTask (dort wird usb_host_client_handle_events gepumpt).
-    auto sem = static_cast<SemaphoreHandle_t>(xfer->context);
-    if (sem != nullptr) xSemaphoreGive(sem);
+    auto* w = static_cast<CtrlWait*>(xfer->context);
+    if (w == nullptr) return;
+
+    bool freeHere;
+    portENTER_CRITICAL(&w->lock);
+    freeHere  = w->abandoned;
+    w->done   = true;
+    portEXIT_CRITICAL(&w->lock);
+
+    if (freeHere)
+    {
+        // Der Wartende ist laengst weg — hier ist der Letzte, der aufraeumen
+        // kann. Das Semaphor nicht mehr anfassen, es wird gleich geloescht.
+        ctrlWaitFree(w);
+        return;
+    }
+
+    xSemaphoreGive(w->sem);
 }
 
 void UsbTarget::findPicoboot(usb_device_handle_t handle)
@@ -956,30 +1045,38 @@ esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, 
         return err;
     }
 
-    SemaphoreHandle_t sem  = xSemaphoreCreateBinary();
-    usb_transfer_t*   xfer = nullptr;
+    CtrlWait* w = new (std::nothrow) CtrlWait();
+    if (w != nullptr) w->sem = xSemaphoreCreateBinary();
 
+    /*
+     * Freigeben nur, solange der Transfer sicher nicht mehr laeuft. Ist das
+     * Geraet zwischendurch verschwunden, hat onDeviceGone() sein Handle schon
+     * geschlossen — dann waere auch das Freigeben des Interface ein Zugriff
+     * auf einen toten Handle.
+     */
     auto cleanup = [&]() {
-        if (xfer != nullptr) usb_host_transfer_free(xfer);
-        if (sem != nullptr) vSemaphoreDelete(sem);
-        // Nach einem Reboot ins Bootloader-Image ist das Geraet weg; Fehler normal.
-        usb_host_interface_release(m_client, device, intf);
+        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        ctrlWaitFree(w);
+        w = nullptr;
     };
 
-    if (sem == nullptr)
+    if (w == nullptr || w->sem == nullptr)
     {
         cleanup();
         error = "kein Speicher fuer die Quittung";
         return ESP_ERR_NO_MEM;
     }
 
-    err = usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + length, 0, &xfer);
+    err = usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + length, 0, &w->xfer);
     if (err != ESP_OK)
     {
         cleanup();
         error = std::string("kein Transferpuffer: ") + esp_err_to_name(err);
         return err;
     }
+
+    // Alias, damit der Rest unveraendert bleibt; Eigentuemer ist der Kontext.
+    usb_transfer_t* xfer = w->xfer;
 
     auto* setup          = reinterpret_cast<usb_setup_packet_t*>(xfer->data_buffer);
     setup->bmRequestType = (toDevice ? USB_BM_REQUEST_TYPE_DIR_OUT : USB_BM_REQUEST_TYPE_DIR_IN) |
@@ -1000,9 +1097,10 @@ esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, 
     xfer->bEndpointAddress = 0;
     xfer->num_bytes        = sizeof(usb_setup_packet_t) + length;
     xfer->callback         = &UsbTarget::picobootXferCb;
-    xfer->context          = sem;
+    xfer->context          = w;
     xfer->timeout_ms       = PICOBOOT_TIMEOUT_MS;
 
+    ctrlWaitArm(w);
     err = usb_host_transfer_submit_control(m_client, xfer);
     if (err != ESP_OK)
     {
@@ -1017,12 +1115,20 @@ esp_err_t UsbTarget::hidFeature(bool toDevice, uint8_t reportId, uint8_t* data, 
      * den Transfer genau dabei ab — das ist der Erfolgsfall, nicht der
      * Fehlerfall.
      */
-    if (xSemaphoreTake(sem, pdMS_TO_TICKS(PICOBOOT_TIMEOUT_MS)) != pdTRUE)
+    if (!waitForCtrl(w, PICOBOOT_TIMEOUT_MS))
     {
+        /*
+         * Abgegeben: `xfer` gehoert ab hier dem Callback und darf nicht mehr
+         * angefasst werden — weder Status noch Daten. Fuer einen Report, der
+         * das Ziel neu startet, ist genau das der Erfolgsfall.
+         */
         ESP_LOGW(TAG, "HID-Feature 0x%02X: keine Quittung - Ziel startet vermutlich neu",
                  reportId);
+        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        return ESP_OK;
     }
-    else if (xfer->status != USB_TRANSFER_STATUS_COMPLETED)
+
+    if (xfer->status != USB_TRANSFER_STATUS_COMPLETED)
     {
         /*
          * Ein Stall heisst: die Report-ID kennt das Ziel nicht. Das ist eine
@@ -1079,24 +1185,29 @@ esp_err_t UsbTarget::picobootReboot(std::string& error)
         return err;
     }
 
-    SemaphoreHandle_t sem  = xSemaphoreCreateBinary();
-    usb_transfer_t*   xfer = nullptr;
+    CtrlWait* w = new (std::nothrow) CtrlWait();
+    if (w != nullptr) w->sem = xSemaphoreCreateBinary();
 
+    /*
+     * Freigeben nur, solange der Transfer sicher nicht mehr laeuft. Ist das
+     * Geraet zwischendurch verschwunden, hat onDeviceGone() sein Handle schon
+     * geschlossen — dann waere auch das Freigeben des Interface ein Zugriff
+     * auf einen toten Handle.
+     */
     auto cleanup = [&]() {
-        if (xfer != nullptr) usb_host_transfer_free(xfer);
-        if (sem != nullptr) vSemaphoreDelete(sem);
-        // Nach einem Neustart ist das Geraet weg; ein Fehler hier ist normal.
-        usb_host_interface_release(m_client, device, intf);
+        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        ctrlWaitFree(w);
+        w = nullptr;
     };
 
-    if (sem == nullptr)
+    if (w == nullptr || w->sem == nullptr)
     {
         cleanup();
         error = "kein Speicher fuer die Quittung";
         return ESP_ERR_NO_MEM;
     }
 
-    err = usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + PICOBOOT_CMD_LEN, 0, &xfer);
+    err = usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + PICOBOOT_CMD_LEN, 0, &w->xfer);
     if (err != ESP_OK)
     {
         cleanup();
@@ -1104,18 +1215,23 @@ esp_err_t UsbTarget::picobootReboot(std::string& error)
         return err;
     }
 
+    // Alias, damit der Rest unveraendert bleibt; Eigentuemer ist der Kontext.
+    usb_transfer_t* xfer = w->xfer;
+
     auto submitAndWait = [&](bool control) -> esp_err_t {
         xfer->device_handle = device;
         xfer->callback      = &UsbTarget::picobootXferCb;
-        xfer->context       = sem;
+        xfer->context       = w;
         xfer->timeout_ms    = PICOBOOT_TIMEOUT_MS;
 
+        ctrlWaitArm(w);
         const esp_err_t sErr = control ? usb_host_transfer_submit_control(m_client, xfer)
                                        : usb_host_transfer_submit(xfer);
         if (sErr != ESP_OK) return sErr;
 
-        if (xSemaphoreTake(sem, pdMS_TO_TICKS(PICOBOOT_TIMEOUT_MS)) != pdTRUE)
-            return ESP_ERR_TIMEOUT;
+        // Bei false ist der Kontext abgegeben; der Aufrufer bricht dann ab und
+        // fasst `xfer` nicht mehr an.
+        if (!waitForCtrl(w, PICOBOOT_TIMEOUT_MS)) return ESP_ERR_TIMEOUT;
 
         return ESP_OK;
     };
@@ -1171,6 +1287,7 @@ esp_err_t UsbTarget::picobootReboot(std::string& error)
     xfer->bEndpointAddress = m_picobootEpOut;
     xfer->num_bytes        = PICOBOOT_CMD_LEN;
 
+    ctrlWaitArm(w);
     err = usb_host_transfer_submit(xfer);
     if (err != ESP_OK)
     {
@@ -1185,11 +1302,15 @@ esp_err_t UsbTarget::picobootReboot(std::string& error)
      * dieselbe Nachsicht wie beim 1200-Baud-Touch, wo das Geraet noch waehrend
      * des Steuertransfers verschwindet.
      */
-    if (xSemaphoreTake(sem, pdMS_TO_TICKS(PICOBOOT_TIMEOUT_MS)) != pdTRUE)
+    if (!waitForCtrl(w, PICOBOOT_TIMEOUT_MS))
     {
+        // Abgegeben — `xfer` gehoert jetzt dem Callback, Finger weg.
         ESP_LOGW(TAG, "PICOBOOT: keine Quittung - Ziel startet vermutlich schon neu");
+        if (m_device == device) usb_host_interface_release(m_client, device, intf);
+        return ESP_OK;
     }
-    else if (xfer->status != USB_TRANSFER_STATUS_COMPLETED)
+
+    if (xfer->status != USB_TRANSFER_STATUS_COMPLETED)
     {
         ESP_LOGW(TAG, "PICOBOOT: Transfer endete mit Status %d - Ziel startet vermutlich neu",
                  static_cast<int>(xfer->status));
