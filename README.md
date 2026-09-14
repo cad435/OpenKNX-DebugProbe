@@ -23,7 +23,7 @@ private tool, for now with no affiliation to the OpenKNX group.
 |---|---|
 | WiFi setup | captive portal, 3 connection attempts, then a fallback AP |
 | Self-update | HTTP OTA with A/B slots and automatic rollback |
-| Target detection | RP2040, ESP32, STM32, CH34x/CP210x/FTDI — including serial number |
+| Target detection | RP2040, ESP32, CH32V003, CH34x/CP210x/FTDI — including serial number |
 | Console | `socket://…:2323` with a 16 KB backlog, survives target resets |
 | Control lines | `rfc2217://…:4000` with baud rate and DTR/RTS |
 | Firmware to the target | UF2 over HTTP, fully validated, then written over USB MSC |
@@ -32,6 +32,10 @@ private tool, for now with no affiliation to the OpenKNX group.
 | Power saving | the radio dozes while no client is attached to 2323 or 4000 |
 | Console in the browser | follow along without a terminal; prompt and ANSI are resolved |
 | Ready-made configuration | the `platformio.ini` lines as a copy field and via `/api/snippet` |
+| Restarting the target | `/api/reset` and `/api/bootmode`, two buttons in the UI — the probe decides what a given target actually supports and says so |
+| Firmware to a CH32V003 | `/api/ch32/flash`, over the rv003usb bootloader's own protocol — no minichlink on the PC |
+| Web UI outside the image | in a LittleFS partition, replaceable over WiFi with `/api/fs` |
+| Why the probe last started | `reset_reason` tells a brownout from a crash — a target with a high inrush can reset the probe |
 
 Architecture, hardware and interfaces in detail: **[docs/](docs/)**.
 
@@ -76,7 +80,6 @@ USB class: the first is reliable, the second is not.
 | ESP32-S2, native USB | `303A:0002`, `303A:1000` | `303A:0002` | DTR/RTS sequence |
 | Any board behind a UART bridge | the bridge chip, see below | **unchanged** — the bridge stays visible either way | DTR/RTS on IO0 and EN |
 | CH32V003 with rv003usb | firmware's choice (`1209:D003` in the example) | `1209:B003` | HID feature report `0xAB` |
-| STM32 with ROM DFU | firmware's choice (`0483:5740` for ST's VCP) | `0483:DF11` | BOOT0 high at reset — **no software path** |
 
 UART bridges, for completeness — these never change between application and bootloader,
 because the mode is selected with DTR/RTS rather than by re-enumerating:
@@ -87,17 +90,31 @@ because the mode is selected with DTR/RTS rather than by re-enumerating:
 
 ### What the probe can do with each
 
+**✅ means verified on real hardware**, not merely implemented. Where a row says
+*untested*, the code is there and follows the reference implementation — but nothing has
+confirmed it yet, and this table would be worth little if it blurred that line.
+
 | Target | Console | Flash | Restart into the application | Into the bootloader |
 |---|---|---|---|---|
-| RP2040 | yes | UF2 over `/api/flash` | PICOBOOT, from BOOTSEL only | yes |
-| ESP32, native USB | yes | esptool over RFC2217 | yes | yes |
-| ESP32 behind a bridge | yes | esptool over RFC2217 | yes | yes |
-| CH32V003 (rv003usb) | — | in progress | not yet | yes |
-| STM32 ROM DFU | — | not implemented | — | press BOOT0 yourself |
+| RP2040 (Pico) | ✅ | ✅ UF2 over `/api/flash` | ✅ PICOBOOT, from BOOTSEL only | ✅ 1200-baud touch |
+| ESP32-S3 / -C3, native USB | ✅ | ✅ esptool over RFC2217 | ✅ RTS pulse | ✅ DTR/RTS with boot latch |
+| CH32V003 (rv003usb bootloader) | — | ✅ `/api/ch32/flash` | ✅ starts the application | ✅ HID feature report `0xAB` |
+| ESP32 behind a UART bridge | ✅ | esptool over RFC2217 | *untested* | *untested* |
+| Any other HID device | — | — | — | the `0xAB` attempt; a stall is reported as a refusal |
 
-A running RP2040 cannot be reset over the cable — native USB has no reset line, and
-PICOBOOT only exists in the boot ROM. Bootmode followed by reset gets there anyway, via the
-boot ROM.
+**A running RP2040 cannot be reset over the cable.** Native USB has no reset line, and
+PICOBOOT lives only in the boot ROM. Bootmode followed by reset gets there anyway — through
+the boot ROM, two clicks, no cable.
+
+**The CH32V003 flasher is written for the V003 specifically.** Sector size and the flash
+controller addresses are fixed in the code. Chip *detection* also knows V002/004/005/006/007
+and X033, but flashing them is not claimed — a different sector size would have to be taught
+first. The scratchpad negotiation and the choice of boot routine already handle the larger
+bootloaders, so that part is done.
+
+**Out of scope** (see `docs/decisions/0005-nur-usb-bediente-ziele.md`): anything without its
+own USB interface. A bare CH32V003 without a bootloader, ARM over SWD, and any external
+debug adapter that would need its USB forwarded.
 
 ## Status LED
 
