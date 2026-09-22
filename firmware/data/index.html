@@ -52,6 +52,7 @@ input#cmd{flex:1 1 18rem;min-width:0;
 input#cmd:disabled{opacity:.5}
 .note.err{color:var(--err)}
 .warnval{color:var(--warn);font-weight:600}
+.errval{color:var(--err);font-weight:600}
 progress{width:100%;height:.5rem;margin-top:.75rem}
 .msg{margin-top:.75rem;font-size:.875rem}
 .msg.ok{color:var(--ok)}
@@ -193,6 +194,7 @@ pre#con{margin:0;padding:.7rem .8rem;height:min(58vh,32rem);overflow:auto;border
       <dt>WLAN</dt><dd id="wifi">–</dd>
       <dt>IP</dt><dd id="ip">–</dd>
       <dt>Funk</dt><dd id="radio">–</dd>
+      <dt>Zelle</dt><dd id="bat">–</dd>
       <dt>Letzter Start</dt><dd id="rst">–</dd>
       <dt>Laufzeit</dt><dd id="up">–</dd>
       <dt>Freier Heap</dt><dd id="heap">–</dd>
@@ -339,6 +341,40 @@ async function poll(){
     // Der Funk dost, solange niemand auf 2323 oder 4000 haengt.
     $("radio").textContent = s.radio_awake === undefined ? "–"
       : (s.radio_awake ? "dauerhaft wach (Client aktiv)" : "Sparmodus");
+    /*
+     * Zelle. "absent" ist kein Fehler, sondern der Normalfall am USB-Kabel —
+     * der Teiler haengt hinter dem Akkuschalter und liegt dann auf Masse.
+     * "unknown" sieht man nur in den ersten ~25 s nach dem Start, solange C9
+     * (10 uF an 500 kOhm) noch laedt und die Messung zu niedrig liest.
+     */
+    const bat = $("bat");
+    const b = s.battery;
+    if(!b || !b.available){
+      bat.textContent = "–"; bat.className = "";
+    } else if(b.level === "absent"){
+      bat.textContent = "keine Zelle (USB-Betrieb)"; bat.className = "";
+    } else if(b.level === "unknown" || !b.settled){
+      bat.textContent = "misst noch …"; bat.className = "";
+    } else {
+      const NOTE = {low:"  — bald laden", critical:"  — gleich aus"};
+      bat.textContent = (b.mv/1000).toFixed(2) + " V  ·  " + b.percent + " %"
+                        + (NOTE[b.level] || "");
+      // Die beiden Stufen müssen sich optisch trennen. Gleiche Farbe hiesse:
+      // "gleich aus" ist genauso laut wie "bald laden", und dann glaubt man
+      // irgendwann keiner von beiden.
+      bat.className = b.level === "critical" ? "errval"
+                    : b.level === "low"      ? "warnval" : "";
+      /*
+       * Zusätzlich oben neben den Namen. Die Zellen-Zeile steht in der
+       * Probe-Kachel, und wer gerade an der Konsole arbeitet, schaut dort
+       * nicht hin. Die Pille ist immer im Blick.
+       */
+      if(b.level === "critical"){
+        $("sub").innerHTML += ' <span class="pill err">Zelle fast leer</span>';
+      } else if(b.level === "low"){
+        $("sub").innerHTML += ' <span class="pill warn">Zelle schwach</span>';
+      }
+    }
     /*
      * Der Grund des letzten Starts ueberlebt den Neustart. Ein Zielgeraet mit
      * hohem Einschaltstrom kann die Probe per Brownout zuruecksetzen — dann

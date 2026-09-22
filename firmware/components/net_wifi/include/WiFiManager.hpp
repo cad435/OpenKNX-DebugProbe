@@ -10,6 +10,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -34,7 +35,8 @@ public:
 
     struct Config
     {
-        std::string hostname;               ///< empty -> "openknx-probe-<mac>"
+        /// Wird nicht mehr ausgewertet — der Name kommt fest aus der MAC.
+        std::string hostname;
         std::string portalPassword;         ///< empty -> open access point
         /// Obergrenze fuer den gesamten Verbindungsaufbau. Normalerweise entscheidet
         /// vorher die Zahl der Versuche; das hier ist nur der Notnagel.
@@ -65,6 +67,36 @@ public:
     bool        hasCredentials() const;
     void        forgetCredentials();
 
+    /**
+     * Grund des letzten Abbruchs (`WIFI_REASON_*`), 0 solange es keinen gab.
+     *
+     * Der eigentliche Wert dieser Zahl: sie unterscheidet "falsches Passwort"
+     * von "Netz nicht gefunden". Ohne sie sieht beides gleich aus — dreimal
+     * erfolglos, dann Portal — und man sucht an der falschen Stelle.
+     */
+    uint8_t     lastDisconnectReason() const { return m_lastReason.load(); }
+
+    /// Klartext zu `lastDisconnectReason()`; Unbekanntes als Nummer.
+    static const char* disconnectReasonName(uint8_t reason);
+
+    /// Klartext zum Verschluesselungsverfahren eines Netzes.
+    static const char* authModeName(wifi_auth_mode_t mode);
+
+    /**
+     * Schreibt alle sichtbaren Netze mit RSSI, Kanal und Verfahren ins Log und
+     * hebt @p wanted hervor.
+     *
+     * Beantwortet die Frage, die man bei einem Fehlschlag wirklich hat: liegt
+     * es am Netz (nicht da, zu schwach) oder an uns (der AP ist da und will
+     * etwas, das wir nicht anbieten)? Darf nur im reinen STA-Modus laufen —
+     * ein Scan im Portal-Modus stoert den eigenen AP.
+     */
+    void logNetworkSurvey(const std::string& wanted) const;
+
+    /// Das Wichtigste ueber die WLAN-Lage in eine Logzeilen-Gruppe, fuer den
+    /// Fall, dass die Probe nur noch ueber die Konsole erreichbar ist.
+    void logDiagnostics() const;
+
     // -----------------------------------------------------------------------
     // Dynamisches Stromsparen
     // -----------------------------------------------------------------------
@@ -89,9 +121,18 @@ public:
     /// true, wenn der Funk gerade dauerhaft wach ist (kein Stromsparen).
     bool isRadioAwake() const { return m_psNoneActive.load(); }
 
-    static constexpr const char* KEY_SSID     = "wifi_ssid";
-    static constexpr const char* KEY_PASS     = "wifi_pass";
-    static constexpr const char* KEY_HOSTNAME = "hostname";
+    static constexpr const char* KEY_SSID = "wifi_ssid";
+    static constexpr const char* KEY_PASS = "wifi_pass";
+
+    /**
+     * Alt: ein im Portal vergebener Geraetename.
+     *
+     * Seit 2026-09-21 **nicht mehr benutzt** — der Name kommt fest aus der MAC
+     * (siehe `defaultHostname()`). Der Schluessel bleibt nur als Name stehen,
+     * damit niemand ihn versehentlich neu belegt; auf alten Geraeten kann er
+     * noch in NVS liegen und wird dort schlicht ignoriert.
+     */
+    static constexpr const char* KEY_HOSTNAME_UNUSED = "hostname";
 
 private:
     static void eventHandler(void* arg, esp_event_base_t base, int32_t id, void* data);
@@ -128,4 +169,20 @@ private:
     esp_timer_handle_t m_portalRetry {nullptr};
     uint8_t          m_attempts {0};
     bool             m_mdnsUp {false};
+
+    /// Aus dem Event-Handler geschrieben, aus HTTP-Tasks gelesen.
+    std::atomic<uint8_t> m_lastReason {0};
+
+    /**
+     * Darf `WIFI_EVENT_STA_START` von sich aus `esp_wifi_connect()` ausloesen?
+     *
+     * Muss sein, weil das Portal auf `WIFI_MODE_APSTA` laeuft: dort feuert
+     * `esp_wifi_start()` ebenfalls ein `STA_START`, und ohne diese Sperre
+     * versuchte die Probe **im Portal-Modus** weiter, sich mit genau den
+     * Zugangsdaten zu verbinden, die gerade gescheitert sind. AP und STA teilen
+     * sich einen Funk und muessen denselben Kanal benutzen — waehrend die STA
+     * scannt und sich anmeldet, setzen die Beacons aus und der AP ist fuer
+     * Handys zeitweise unsichtbar. Genau dann braucht man ihn aber.
+     */
+    std::atomic<bool> m_staAutoConnect {false};
 };

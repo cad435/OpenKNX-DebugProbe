@@ -72,9 +72,12 @@ esp_err_t WiFiManager::init(const Config& cfg)
     m_psMutex = xSemaphoreCreateMutex();
     if (m_psMutex == nullptr) return ESP_ERR_NO_MEM;
 
-    m_hostname = m_settings.getString(KEY_HOSTNAME, "");
-    if (m_hostname.empty()) m_hostname = cfg.hostname;
-    if (m_hostname.empty()) m_hostname = defaultHostname();
+    // Der Name wird NICHT mehr aus NVS oder der Config genommen, sondern
+    // immer aus der MAC abgeleitet. Begruendung siehe defaultHostname().
+    // Ein evtl. noch gespeicherter `hostname`-Schluessel wird dabei bewusst
+    // ignoriert statt geloescht — er stoert nicht und dokumentiert die
+    // Herkunft einer aelteren Einrichtung.
+    m_hostname = defaultHostname();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -120,6 +123,33 @@ esp_err_t WiFiManager::connectSta()
     std::strncpy(reinterpret_cast<char*>(wc.sta.password), pass.c_str(), sizeof(wc.sta.password) - 1);
     wc.sta.threshold.authmode = pass.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
 
+    /*
+     * PMF anbieten, aber nicht verlangen.
+     *
+     * `wifi_config_t wc = {}` nullt auch `pmf_cfg`, und der Wert wird laut
+     * esp_wifi_types_generic.h "in den RSN Capabilities des RSN IE
+     * ausgestrahlt". Mit `capable = false` sagt die Probe dem AP also aktiv
+     * "ich kann kein PMF". Verlangt der AP es — bei WPA3-SAE ist PMF
+     * zwingend, bei modernen WPA2/WPA3-Mischbetrieben oft eingeschaltet —
+     * beantwortet er den Auth-Frame gar nicht erst.
+     *
+     * Das Fehlerbild dazu ist tueckisch, weil es nach falschem Passwort
+     * aussieht, aber keines ist: `state: init -> auth` und nach genau 1000 ms
+     * `auth -> init` mit Grund 2 (Authentifizierung abgelaufen). Das Passwort
+     * kommt dabei nie zur Pruefung — der 4-Wege-Handschlag, in dem es
+     * geprueft wuerde, wird nie erreicht. Am 2026-09-21 an einer Probe
+     * gesehen, die sich partout nicht anmelden wollte.
+     *
+     * `required = false` bleibt: alte APs ohne PMF sollen weiter gehen.
+     */
+    wc.sta.pmf_cfg.capable  = true;
+    wc.sta.pmf_cfg.required = false;
+
+    // Fuer WPA3-SAE: beide Ableitungsverfahren anbieten. Manche APs bestehen
+    // auf Hash-to-Element, andere koennen nur Hunt-and-Peck.
+    wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+
+    m_staAutoConnect.store(true);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -148,6 +178,11 @@ esp_err_t WiFiManager::connectSta()
         startMdns();
         return ESP_OK;
     }
+
+    // Noch im STA-Modus, also ohne eigenen AP, den ein Scan stoeren koennte:
+    // einmal aufnehmen, was ueberhaupt da ist. Das trennt "Netz nicht da"
+    // von "Netz da, aber es will etwas, das wir nicht anbieten".
+    logNetworkSurvey(ssid);
 
     esp_wifi_stop();
     m_state = State::Idle;
@@ -208,6 +243,9 @@ void WiFiManager::applyPowerSave()
 
 esp_err_t WiFiManager::startPortal()
 {
+    // Ab hier soll die STA-Seite still sein: das Portal laeuft auf APSTA, und
+    // ein Verbindungsversuch nebenher macht den AP zeitweise unsichtbar.
+    m_staAutoConnect.store(false);
     esp_wifi_stop();
 
     if (m_apNetif == nullptr) m_apNetif = esp_netif_create_default_wifi_ap();
@@ -241,7 +279,13 @@ esp_err_t WiFiManager::startPortal()
     m_dns.start(ip.ip.addr);
 
     m_state = State::Portal;
-    ESP_LOGW(TAG, "portal up: SSID '%s', http://" IPSTR "/", apSsid.c_str(), IP2STR(&ip.ip));
+    ESP_LOGW(TAG, "PORTAL OFFEN: SSID '%s' (offen), http://" IPSTR "/",
+             apSsid.c_str(), IP2STR(&ip.ip));
+    if (hasCredentials())
+    {
+        ESP_LOGW(TAG, "Grund fuer das Portal: %s",
+                 disconnectReasonName(m_lastReason.load()));
+    }
 
     // Notfall-Portal (Zugangsdaten sind vorhanden, das WLAN war nur nicht da):
     // nach einer Weile ohne Neukonfiguration neu starten und wieder verbinden.
@@ -297,16 +341,36 @@ void WiFiManager::eventHandler(void* arg, esp_event_base_t base, int32_t id, voi
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START)
     {
         esp_netif_set_hostname(self->m_staNetif, self->m_hostname.c_str());
+
+        // Nur verbinden, wenn wir das auch wollen. Im Portal-Modus laeuft
+        // APSTA, dort feuert esp_wifi_start() ebenfalls ein STA_START — siehe
+        // m_staAutoConnect.
+        if (!self->m_staAutoConnect.load())
+        {
+            ESP_LOGI(TAG, "STA gestartet, aber kein Verbindungsversuch "
+                          "(Portal-Modus haelt den Funk fuer den AP frei)");
+            return;
+        }
+
         self->m_attempts = 1;
         esp_wifi_connect();
     }
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED)
     {
+        // Der Grund ist die einzige Stelle, an der der Treiber verraet, WARUM
+        // es nicht klappt. Ohne ihn sind "falsches Passwort" und "Netz nicht
+        // in Reichweite" von aussen nicht zu unterscheiden — beides endet in
+        // drei erfolglosen Versuchen und dem Portal.
+        const auto*   ev     = static_cast<wifi_event_sta_disconnected_t*>(data);
+        const uint8_t reason = (ev != nullptr) ? ev->reason : 0;
+        self->m_lastReason.store(reason);
+
         if (self->m_state == State::Connected)
         {
             // Already been online once: keep trying forever, do not fall back
             // to the portal just because an access point rebooted.
-            ESP_LOGW(TAG, "link lost, reconnecting");
+            ESP_LOGW(TAG, "Verbindung verloren (%s), verbinde neu",
+                     disconnectReasonName(reason));
             self->m_state = State::Connecting;
             esp_wifi_connect();
         }
@@ -315,13 +379,15 @@ void WiFiManager::eventHandler(void* arg, esp_event_base_t base, int32_t id, voi
             if (self->m_attempts < MAX_CONNECT_ATTEMPTS)
             {
                 ++self->m_attempts;
-                ESP_LOGW(TAG, "Verbindung fehlgeschlagen, Versuch %u/%u",
+                ESP_LOGW(TAG, "Verbindung fehlgeschlagen (%s), Versuch %u/%u",
+                         disconnectReasonName(reason),
                          self->m_attempts, MAX_CONNECT_ATTEMPTS);
                 esp_wifi_connect();
             }
             else
             {
-                ESP_LOGE(TAG, "%u Versuche erfolglos", MAX_CONNECT_ATTEMPTS);
+                ESP_LOGE(TAG, "%u Versuche erfolglos, letzter Grund: %s",
+                         MAX_CONNECT_ATTEMPTS, disconnectReasonName(reason));
                 xEventGroupSetBits(self->m_events, BIT_FAILED);
             }
         }
@@ -392,13 +458,166 @@ void WiFiManager::forgetCredentials()
     m_settings.erase(KEY_PASS);
 }
 
+const char* WiFiManager::authModeName(wifi_auth_mode_t mode)
+{
+    switch (mode)
+    {
+        case WIFI_AUTH_OPEN:            return "offen";
+        case WIFI_AUTH_WEP:             return "WEP";
+        case WIFI_AUTH_WPA_PSK:         return "WPA";
+        case WIFI_AUTH_WPA2_PSK:        return "WPA2";
+        case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2";
+        case WIFI_AUTH_ENTERPRISE:      return "WPA2-Enterprise";
+        case WIFI_AUTH_WPA3_PSK:        return "WPA3 (PMF zwingend)";
+        case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/WPA3 (PMF fuer den WPA3-Zweig)";
+        case WIFI_AUTH_WAPI_PSK:        return "WAPI";
+        case WIFI_AUTH_OWE:             return "OWE";
+        default:                        break;
+    }
+    static char buf[24];
+    std::snprintf(buf, sizeof(buf), "Modus %d", static_cast<int>(mode));
+    return buf;
+}
+
+void WiFiManager::logNetworkSurvey(const std::string& wanted) const
+{
+    // Einmal hinsehen, bevor der Funk abgeschaltet wird. Die Frage, die das
+    // beantwortet: liegt es am Netz (nicht da, zu schwach) oder an uns (der
+    // AP ist da und will etwas, das wir nicht anbieten)?
+    wifi_scan_config_t cfg = {};
+    cfg.show_hidden        = false;
+
+    if (esp_wifi_scan_start(&cfg, true) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Umfeld-Aufnahme nicht moeglich (Scan abgelehnt)");
+        return;
+    }
+
+    uint16_t count = 0;
+    esp_wifi_scan_get_ap_num(&count);
+    if (count == 0)
+    {
+        ESP_LOGW(TAG, "Umfeld-Aufnahme: KEIN einziges Netz in Reichweite");
+        return;
+    }
+    if (count > 24) count = 24;
+
+    auto* recs = static_cast<wifi_ap_record_t*>(calloc(count, sizeof(wifi_ap_record_t)));
+    if (recs == nullptr)
+    {
+        esp_wifi_clear_ap_list();
+        return;
+    }
+    esp_wifi_scan_get_ap_records(&count, recs);
+
+    ESP_LOGW(TAG, "---------------- Umfeld-Aufnahme ----------------");
+    bool found = false;
+    for (uint16_t i = 0; i < count; ++i)
+    {
+        const char* name = reinterpret_cast<const char*>(recs[i].ssid);
+        const bool  hit  = (wanted == name);
+        if (hit) found = true;
+
+        ESP_LOGW(TAG, " %s %-24s %4d dBm  Kanal %2d  %s",
+                 hit ? "->" : "  ", name, recs[i].rssi, recs[i].primary,
+                 authModeName(recs[i].authmode));
+    }
+
+    if (!found)
+    {
+        ESP_LOGE(TAG, " '%s' ist NICHT in Reichweite - Name falsch geschrieben, "
+                      "oder der AP funkt nur auf 5 GHz", wanted.c_str());
+    }
+    ESP_LOGW(TAG, "-------------------------------------------------");
+
+    free(recs);
+}
+
+const char* WiFiManager::disconnectReasonName(uint8_t reason)
+{
+    // Nur die Faelle, die man in einer Werkstatt wirklich trifft, dafuer in
+    // Klartext und mit der Handlungsanweisung schon drin. Der Rest kommt als
+    // Nummer — wer den braucht, schlaegt ihn in esp_wifi_types.h nach.
+    switch (reason)
+    {
+        case 0:   return "kein Abbruch bisher";
+        case 1:   return "unspezifisch";
+        case 2:   return "Authentifizierung abgelaufen";
+        case 4:   return "Zuordnung abgelaufen";
+        case 8:   return "AP hat die Verbindung beendet";
+        case 15:  return "4-Wege-Handschlag verpasst - PASSWORT PRUEFEN";
+        case 23:  return "802.1X fehlgeschlagen (Enterprise-WLAN?)";
+        case 200: return "Beacon-Timeout - Empfang zu schwach";
+        case 201: return "Netz nicht gefunden - SSID falsch, ausser Reichweite, oder 5 GHz (der S3 kann nur 2,4 GHz)";
+        case 202: return "Authentifizierung abgelehnt - PASSWORT PRUEFEN";
+        case 203: return "Zuordnung abgelehnt";
+        case 204: return "Handschlag-Timeout - PASSWORT PRUEFEN";
+        case 205: return "Verbindungsaufbau fehlgeschlagen";
+    }
+
+    // Statisch, weil der Aufrufer nur einen const char* erwartet. Ein Aufruf
+    // ueberschreibt den vorigen — in einer Logzeile ist das folgenlos.
+    static char buf[32];
+    std::snprintf(buf, sizeof(buf), "Grund %u", static_cast<unsigned>(reason));
+    return buf;
+}
+
+void WiFiManager::logDiagnostics() const
+{
+    const std::string stored = m_settings.getString(KEY_SSID);
+
+    ESP_LOGW(TAG, "---------------- WLAN-Diagnose ----------------");
+    ESP_LOGW(TAG, " Name          : %s", m_hostname.c_str());
+    ESP_LOGW(TAG, " Zustand       : %s", stateName());
+    ESP_LOGW(TAG, " Gespeichert   : %s", stored.empty() ? "(nichts)" : stored.c_str());
+
+    if (m_state == State::Connected)
+    {
+        ESP_LOGW(TAG, " Verbunden mit : %s (%d dBm)", ssid().c_str(), rssi());
+        ESP_LOGW(TAG, " Adresse       : http://%s/", ip().c_str());
+    }
+    else
+    {
+        ESP_LOGW(TAG, " Letzter Grund : %s", disconnectReasonName(m_lastReason.load()));
+        if (m_state == State::Portal)
+        {
+            ESP_LOGW(TAG, " Portal        : SSID '%s', http://%s/",
+                     m_hostname.c_str(), ip().c_str());
+        }
+    }
+
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    ESP_LOGW(TAG, " MAC (STA)     : %02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ESP_LOGW(TAG, "-----------------------------------------------");
+}
+
+/**
+ * Der Name der Probe — fest aus der MAC abgeleitet, nicht einstellbar.
+ *
+ * Entscheidung 2026-09-21: vorher liess sich im Portal ein eigener Name
+ * vergeben, der in NVS landete. Das hat mehr Aerger gemacht als genutzt —
+ * zwei Probes auf dem Tisch, und man weiss nicht mehr, welche welche ist,
+ * weil der Name nichts mehr mit dem Geraet zu tun hat. Die letzten beiden
+ * MAC-Bytes stehen dagegen fest und sind pro Chip eindeutig.
+ *
+ * Schreibweise: `OpenKNX-Probe` wie die Marke, die beiden MAC-Bytes in
+ * Grossbuchstaben — `OpenKNX-Probe-A1B2`. Das hebt den geraetespezifischen
+ * Teil vom festen ab und ist auf einem Aufkleber besser zu entziffern.
+ *
+ * Fuer die Aufloesung ist die Schreibweise folgenlos: DNS und mDNS sind laut
+ * RFC 4343 ohne Ruecksicht auf Gross-/Kleinschreibung aufzuloesen, es fuehren
+ * also `OpenKNX-Probe-A1B2.local` und `openknx-probe-a1b2.local` zum selben
+ * Geraet. Wer den Namen tippt, darf ihn kleinschreiben.
+ */
 std::string WiFiManager::defaultHostname() const
 {
     uint8_t mac[6] = {};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "openknx-probe-%02x%02x", mac[4], mac[5]);
+    std::snprintf(buf, sizeof(buf), "OpenKNX-Probe-%02X%02X", mac[4], mac[5]);
     return std::string(buf);
 }
 
@@ -471,6 +690,10 @@ esp_err_t WiFiManager::handleScan(httpd_req_t* req)
         json += std::to_string(records[i].rssi);
         json += R"(,"open":)";
         json += (records[i].authmode == WIFI_AUTH_OPEN) ? "true" : "false";
+        // Das Verfahren im Klartext dazu: bei einem Netz, das sich partout
+        // nicht verbinden laesst, ist "WPA3 (PMF zwingend)" die halbe Antwort.
+        json += R"(,"auth":")" + jsonEscape(authModeName(records[i].authmode), 48) + '"';
+        json += R"(,"channel":)" + std::to_string(records[i].primary);
         json += '}';
     }
     json += ']';
@@ -491,16 +714,18 @@ esp_err_t WiFiManager::handleConnect(httpd_req_t* req)
 
     const std::string ssid = WebServer::formValue(body, "ssid");
     const std::string pass = WebServer::formValue(body, "pass");
-    const std::string name = WebServer::formValue(body, "name");
 
     if (ssid.empty())
     {
         return WebServer::sendStatus(req, "400 Bad Request", R"({"error":"ssid missing"})");
     }
 
+    // Ein `name`-Feld wird bewusst NICHT mehr ausgewertet: der Geraetename
+    // kommt seit 2026-09-21 fest aus der MAC (siehe defaultHostname()).
+    // Aeltere Formulare oder Skripte duerfen ihn weiter mitschicken, er
+    // laeuft dann einfach ins Leere.
     self->m_settings.setString(KEY_SSID, ssid);
     self->m_settings.setString(KEY_PASS, pass);
-    if (!name.empty()) self->m_settings.setString(KEY_HOSTNAME, name);
 
     ESP_LOGI(TAG, "credentials for '%s' stored, restarting", ssid.c_str());
 

@@ -38,11 +38,10 @@ button.link{background:none;color:var(--acc);width:auto;padding:.2rem 0;font-siz
     <label for="pass" style="margin-top:1rem">Passwort</label>
     <input type="password" id="pass" name="pass" autocomplete="off">
 
-    <label for="name">Gerätename</label>
-    <input type="text" id="name" name="name" placeholder="openknx-probe" pattern="[a-z0-9\-]{3,30}">
-    <p class="hint" style="margin:-.75rem 0 1rem">
-      Erreichbar als <code>&lt;name&gt;.local</code>. Bei mehreren Probes je einen
-      eigenen Namen vergeben.
+    <p class="hint" style="margin:1rem 0">
+      Den Gerätenamen vergibt die Probe selbst aus ihrer MAC — es ist der Name
+      des WLANs, mit dem du gerade verbunden bist. Nach dem Neustart ist sie
+      unter <code>&lt;name&gt;.local</code> erreichbar, pro Gerät eindeutig.
     </p>
 
     <button type="submit">Verbinden und neu starten</button>

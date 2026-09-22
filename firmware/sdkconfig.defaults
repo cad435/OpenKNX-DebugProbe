@@ -50,14 +50,27 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # --- Konsole -----------------------------------------------------------------
-# UART0 (GPIO43 TX / GPIO44 RX) auf einen externen USB-UART-Adapter.
-# Bewusst NICHT USB-Serial-JTAG: der liegt auf GPIO19/20 und faellt weg, sobald
-# der OTG-Port als USB-Host arbeitet. Ausserdem war er praktisch nicht lesbar
-# (0 Bytes, siehe docs/hardware.md).
+# PRIMAER: UART0 (GPIO43 TX / GPIO44 RX) auf einen externen USB-UART-Adapter.
+# Bleibt der verlaessliche Weg, weil UART0 dem OTG-Port nicht in die Quere kommt.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
-CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+#
+# SEKUNDAER: zusaetzlich auf den USB-Serial-JTAG spiegeln.
+#
+# Hier stand vorher SECONDARY_NONE, begruendet damit, dass der USB-Serial-JTAG
+# wegfaellt, sobald der OTG-Port als Host arbeitet. Das stimmt weiterhin — es
+# ist nur kein Grund, ihn gar nicht erst zu benutzen: solange die Probe NICHT
+# im Host-Modus ist, haengt sie als gewoehnliches USB-Geraet am PC und kann
+# genau hierueber reden. Schaltet sie spaeter auf Host, verstummt der Zweig.
+#
+# Warum das gebraucht wird (2026-09-21, an einer frisch geflashten Probe
+# gelernt): kam das WLAN nicht zustande, war die Probe VOLLSTAENDIG stumm —
+# kein Netz, Konsole auf einem Pin ohne Adapter, USB als Host vom PC
+# abgemeldet. Die einzige Aussage war eine rot pulsierende LED. Zusammen mit
+# dem verzoegerten Host-Start (siehe main.cpp) ist der Startvorgang jetzt am PC
+# mitlesbar — genau dann, wenn man es braucht.
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 
 # --- Optimierung --------------------------------------------------------------
 # ESP-IDF steht per Default auf -Og. Damit erzeugt xtensa-esp-elf 14.2.0 beim

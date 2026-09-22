@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "BatteryMonitor.hpp"
 #include "OtaUpdater.hpp"
 #include "Rfc2217Server.hpp"
 #include "SerialBridge.hpp"
@@ -55,6 +56,7 @@ struct AppContext
     SerialBridge*  bridge;
     Rfc2217Server* rfc2217;
     StatusLed*     led;
+    BatteryMonitor* battery;
 };
 
 /// Standardpin der RGB-LED auf den SuperMini-Varianten. Nur eine Vermutung —
@@ -330,6 +332,32 @@ std::string consoleJson(const SerialBridge& bridge, const Rfc2217Server& rfc)
     return json;
 }
 
+/**
+ * Die Zelle fuer `/api/status`.
+ *
+ * `level` ist der Zustand, `mv` die Zellenspannung, `pin_mv` die gemessene
+ * Spannung am Teilerabgriff. Das Rohmass steht bewusst mit drin: weicht
+ * `mv` von einem Multimeter ab, sagt `pin_mv` sofort, ob der Teiler anders
+ * teilt als gedacht oder der ADC danebenliegt.
+ *
+ * `settled` ist waehrend der ersten rund 25 s nach dem Start false — so lange
+ * laedt `C9` noch und die Messung liest zu niedrig.
+ */
+std::string batteryJson(const BatteryMonitor& bat)
+{
+    if (!bat.available()) return R"({"available":false})";
+
+    std::string json = R"({"available":true)";
+    json += ",\"level\":" + jsonString(BatteryMonitor::levelName(bat.level()));
+    json += ",\"settled\":" + std::string(bat.warmedUp() ? "true" : "false");
+    json += ",\"mv\":" + std::to_string(bat.millivolts());
+    json += ",\"pin_mv\":" + std::to_string(bat.pinMillivolts());
+    json += ",\"percent\":" + std::to_string(bat.percent());
+    json += ",\"trim\":" + std::to_string(bat.trim());
+    json += "}";
+    return json;
+}
+
 esp_err_t handleStatus(httpd_req_t* req)
 {
     const auto* ctx = static_cast<const AppContext*>(req->user_ctx);
@@ -342,6 +370,13 @@ esp_err_t handleStatus(httpd_req_t* req)
     json += "\"pending_verify\":" + std::string(ctx->ota->isPendingVerify() ? "true" : "false") + ",";
     json += "\"reset_reason\":" + jsonString(resetReasonName()) + ",";
     json += "\"wifi\":" + jsonString(ctx->wifi->stateName()) + ",";
+    // Warum es zuletzt nicht geklappt hat. Im Portal-Modus die einzige
+    // Auskunft, die "falsches Passwort" von "Netz nicht da" trennt.
+    json += "\"wifi_reason\":" +
+            jsonString(WiFiManager::disconnectReasonName(
+                ctx->wifi->lastDisconnectReason())) + ",";
+    json += "\"usb_host\":" +
+            std::string(ctx->usb->state() == UsbTarget::State::NotStarted ? "false" : "true") + ",";
     json += "\"ssid\":" + jsonString(ctx->wifi->ssid()) + ",";
     json += "\"rssi\":" + std::to_string(ctx->wifi->rssi()) + ",";
     json += "\"ip\":" + jsonString(ctx->wifi->ip()) + ",";
@@ -349,6 +384,7 @@ esp_err_t handleStatus(httpd_req_t* req)
             ",\"mode\":" + jsonString(StatusLed::modeName(ctx->led->mode())) + "},";
     json += "\"radio_awake\":" +
             std::string(ctx->wifi->isRadioAwake() ? "true" : "false") + ",";
+    json += "\"battery\":" + batteryJson(*ctx->battery) + ",";
     json += "\"target\":" + targetJson(*ctx->usb) + ",";
     json += "\"console\":" + consoleJson(*ctx->bridge, *ctx->rfc2217) + ",";
     json += "\"snippet\":" +
@@ -741,6 +777,61 @@ esp_err_t handleBootmode(httpd_req_t* req)
 }
 
 /**
+ * POST /api/battery/calibrate?mv=3870 — Feinabgleich gegen ein Multimeter.
+ *
+ * Gedacht fuer einmal pro Board: Zelle anklemmen, Schalter ein, eine halbe
+ * Minute warten, an der Zelle messen, den Wert hier hereingeben. Die Probe
+ * rechnet daraus den Korrekturfaktor und legt ihn in NVS ab.
+ *
+ * Warum ueberhaupt: `R5`/`R6` sind 1-%-Typen, das sind im ungluecklichen Fall
+ * 2 % auf das Teilungsverhaeltnis, dazu kommt die Streuung der ADC-Kennlinie.
+ * Bei 3,8 V sind das schnell 100 mV — genug, um die Leerwarnung eine halbe
+ * Stunde zu frueh oder zu spaet kommen zu lassen.
+ */
+esp_err_t handleBatteryCalibrate(httpd_req_t* req)
+{
+    auto* ctx = static_cast<AppContext*>(req->user_ctx);
+
+    char query[64] = {};
+    char value[16] = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "mv", value, sizeof(value)) != ESP_OK)
+    {
+        return WebServer::sendStatus(
+            req, "400 Bad Request",
+            R"({"error":"gemessene Zellenspannung fehlt, erwartet ?mv=3870"})");
+    }
+
+    const long mv = strtol(value, nullptr, 10);
+    if (mv <= 0 || mv > 5000)
+    {
+        return WebServer::sendStatus(req, "400 Bad Request",
+                                     R"({"error":"mv liegt ausserhalb jeder Zelle"})");
+    }
+
+    const esp_err_t err = ctx->battery->calibrateTo(static_cast<uint16_t>(mv));
+    if (err == ESP_ERR_INVALID_STATE)
+    {
+        return WebServer::sendStatus(
+            req, "409 Conflict",
+            R"({"error":"keine eingeschwungene Messung - haengt eine Zelle dran, und stand sie 30 s?"})");
+    }
+    if (err == ESP_ERR_INVALID_ARG)
+    {
+        return WebServer::sendStatus(
+            req, "400 Bad Request",
+            R"({"error":"Korrektur groesser 25 % - da stimmt etwas anderes nicht als die Toleranz"})");
+    }
+    if (err != ESP_OK)
+    {
+        return WebServer::sendStatus(req, "500 Internal Server Error",
+                                     R"({"error":"Abgleich nicht gespeichert"})");
+    }
+
+    return WebServer::sendJson(req, batteryJson(*ctx->battery));
+}
+
+/**
  * Leitet den LED-Modus aus dem Betriebszustand ab.
  *
  * Reihenfolge ist die Dringlichkeit: `Flashing` setzt handleFlash() selbst und
@@ -760,11 +851,17 @@ void ledSupervisorTask(void* arg)
         {
             StatusLed::Mode next = StatusLed::Mode::Idle;
 
-            // Reihenfolge = Dringlichkeit. BatteryLow fehlt hier bewusst:
-            // das Board hat keine Akkumessung, der Modus existiert schon,
-            // wird aber von nichts gesetzt (siehe CLAUDE.md, offener Punkt
-            // zum Teiler auf dem PCB).
-            if (ctx->wifi->state() != WiFiManager::State::Connected)
+            // Reihenfolge = Dringlichkeit. Die leere Zelle steht oben, weil
+            // sie als einzige die Probe gleich ganz abschaltet — ein fehlendes
+            // WLAN kommt wieder, eine leere Zelle nicht von selbst.
+            //
+            // Der Monitor meldet waehrend der ersten rund 25 s `Unknown`
+            // (siehe BatteryMonitor.hpp, `C9` laedt noch) und im USB-Betrieb
+            // `Absent`. Beides faellt hier durch und nichts leuchtet rot.
+            const auto bat = ctx->battery->level();
+            if (bat == BatteryMonitor::Level::Low || bat == BatteryMonitor::Level::Critical)
+                next = StatusLed::Mode::BatteryLow;
+            else if (ctx->wifi->state() != WiFiManager::State::Connected)
                 next = StatusLed::Mode::NoWifi;
             else if (ctx->bridge->hasClient() || ctx->rfc2217->hasClient())
                 next = StatusLed::Mode::Busy;
@@ -790,6 +887,91 @@ void onClientActivity(bool busy, void* ctx)
 
     if (busy) wifi->acquireLowLatency();
     else      wifi->releaseLowLatency();
+}
+
+/**
+ * Faehrt den USB-Host-Stack hoch: Ziel erkennen, Konsole auf 2323, RFC2217.
+ *
+ * Eigene Funktion, weil der Zeitpunkt nicht mehr fest ist — siehe usbGateTask().
+ */
+void startUsbStack(AppContext& ctx)
+{
+    const esp_err_t usbErr = ctx.usb->begin();
+    if (usbErr != ESP_OK)
+    {
+        ESP_LOGE(TAG, "USB host not available: %s", esp_err_to_name(usbErr));
+        return;
+    }
+
+    const esp_err_t bridgeErr = ctx.bridge->begin(*ctx.usb, 2323, 16384);
+    if (bridgeErr != ESP_OK)
+    {
+        ESP_LOGE(TAG, "serial bridge not available: %s", esp_err_to_name(bridgeErr));
+        return;
+    }
+    ESP_LOGI(TAG, "console: socket://%s.local:2323", ctx.wifi->hostname().c_str());
+
+    // Solange einer der beiden Server einen Client hat, bleibt der Funk wach;
+    // danach dost er wieder. Das kostet im Leerlauf rund 100 mA weniger und
+    // haelt den S3 merklich kuehler.
+    ctx.bridge->setActivityHook(&onClientActivity, ctx.wifi);
+    ctx.rfc2217->setActivityHook(&onClientActivity, ctx.wifi);
+    ctx.bridge->setRfc2217(ctx.rfc2217);
+
+    const esp_err_t rfcErr = ctx.rfc2217->begin(*ctx.usb, 4000);
+    if (rfcErr != ESP_OK)
+    {
+        ESP_LOGE(TAG, "RFC2217 not available: %s", esp_err_to_name(rfcErr));
+        return;
+    }
+    ESP_LOGI(TAG, "control: rfc2217://%s.local:4000", ctx.wifi->hostname().c_str());
+}
+
+/**
+ * Haelt den USB-Port im Device-Modus, bis das WLAN steht.
+ *
+ * Hintergrund: USB-Serial-JTAG und der OTG-Port teilen sich beim S3 denselben
+ * PHY (GPIO19/20). `usb_host_install()` nimmt ihn sich — ab da ist die Probe am
+ * PC nicht mehr sichtbar, und ihre Konsole liegt nur noch auf UART0 an
+ * GPIO43/44, also hinter einem Adapter, den im Zweifel niemand angeloetet hat.
+ *
+ * Genau das war am 2026-09-21 der Fall: eine frisch geflashte Probe kam nicht
+ * ins WLAN und war dadurch **vollstaendig stumm** — kein Netz, kein USB, als
+ * einzige Aussage eine rot pulsierende LED. Solange das WLAN nicht steht,
+ * bleibt der Port deshalb jetzt im Device-Modus, und der Startvorgang ist am PC
+ * mitlesbar (sekundaere Konsole, siehe sdkconfig.defaults).
+ *
+ * **Der Wechsel ist einseitig: einmal Host, immer Host.** Ein spaeterer
+ * WLAN-Abriss darf den Stack nicht wieder abraeumen — es koennte eine
+ * Flash-Sitzung laufen, und die Probe verbindet sich ohnehin unbegrenzt neu.
+ *
+ * Haengt waehrend der Wartezeit ein Ziel am Kabel, passiert nichts Schlimmes:
+ * zwei Device-Ports ohne Host enumerieren einander nicht, und die Probe liefert
+ * kein VBUS. Das Ziel wird schlicht erst erkannt, wenn das WLAN steht.
+ */
+void usbGateTask(void* arg)
+{
+    auto* ctx = static_cast<AppContext*>(arg);
+
+    ESP_LOGW(TAG, "kein WLAN - USB bleibt im Device-Modus, Konsole liegt am USB an");
+    ctx->wifi->logDiagnostics();
+
+    uint32_t waitedMs = 0;
+    while (ctx->wifi->state() != WiFiManager::State::Connected)
+    {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        waitedMs += 500;
+
+        // Alle 30 s eine Standortbestimmung, damit am Mitschnitt ablesbar ist,
+        // WORAN es haengt, statt nur DASS es haengt.
+        if (waitedMs % 30000 == 0) ctx->wifi->logDiagnostics();
+    }
+
+    ESP_LOGI(TAG, "WLAN steht nach %lu s - USB wechselt in den Host-Modus. "
+                  "Die Probe meldet sich jetzt als USB-Geraet vom PC ab.",
+             static_cast<unsigned long>(waitedMs / 1000));
+    startUsbStack(*ctx);
+    vTaskDelete(nullptr);
 }
 
 /**
@@ -999,8 +1181,18 @@ extern "C" void app_main(void)
     static SerialBridge  bridge;
     static Rfc2217Server rfc2217;
     static StatusLed     led;
+    static BatteryMonitor battery;
 
     ESP_ERROR_CHECK(settings.begin());
+
+    // Frueh, aber nicht fatal: ohne Teiler auf dem Board (Prototyp am
+    // Steckbrett) schlaegt hier nichts fehl, die Messung meldet dann dauerhaft
+    // "keine Zelle". Eine Probe am USB-Kabel laeuft genauso weiter.
+    const esp_err_t batErr = battery.begin(settings);
+    if (batErr != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Zellenmessung nicht verfuegbar: %s", esp_err_to_name(batErr));
+    }
 
     // Die LED so frueh wie moeglich: sie ist die einzige Rueckmeldung, solange
     // WLAN und Konsole noch nicht stehen.
@@ -1034,7 +1226,7 @@ extern "C" void app_main(void)
         ESP_LOGW(TAG, "Web-Assets nicht verfuegbar: %s", esp_err_to_name(assetsErr));
     }
 
-    g_ctx = AppContext{&settings, &wifi, &ota, &usb, &bridge, &rfc2217, &led};
+    g_ctx = AppContext{&settings, &wifi, &ota, &usb, &bridge, &rfc2217, &led, &battery};
     ESP_ERROR_CHECK(web.on("/api/status", HTTP_GET, &handleStatus, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/flash", HTTP_POST, &handleFlash, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/reset", HTTP_POST, &handleReset, &g_ctx));
@@ -1042,6 +1234,7 @@ extern "C" void app_main(void)
     // Alter Name aus der Zeit, als es nur den RP2040-Touch gab.
     ESP_ERROR_CHECK(web.on("/api/bootsel", HTTP_POST, &handleBootmode, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/led", HTTP_POST, &handleLed, &g_ctx));
+    ESP_ERROR_CHECK(web.on("/api/battery/calibrate", HTTP_POST, &handleBatteryCalibrate, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_POST, &handleConsoleSend, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/console", HTTP_GET, &handleConsole, &g_ctx));
     ESP_ERROR_CHECK(web.on("/api/snippet", HTTP_GET, &handleSnippet, &g_ctx));
@@ -1063,41 +1256,23 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "ready: http://%s.local/", wifi.hostname().c_str());
     }
 
+    // Der Startvorgang ist ab hier auf jeden Fall nachvollziehbar: steht das
+    // WLAN, per HTTP; steht es nicht, ueber die sekundaere Konsole am USB.
+    wifi.logDiagnostics();
+
     // Erst jetzt den USB-Host starten: OTA ist ab hier erreichbar, und ein
     // Absturz hier führt zum Rollback statt zu einer toten Probe.
-    const esp_err_t usbErr = usb.begin();
-    if (usbErr != ESP_OK)
+    //
+    // UND erst, wenn das WLAN steht — der Host-Modus kostet den USB-Serial-JTAG
+    // und damit die letzte Auskunftsmoeglichkeit einer Probe ohne Netz.
+    // Begruendung in voller Laenge bei usbGateTask().
+    if (wifi.state() == WiFiManager::State::Connected)
     {
-        ESP_LOGE(TAG, "USB host not available: %s", esp_err_to_name(usbErr));
+        startUsbStack(g_ctx);
     }
     else
     {
-        const esp_err_t bridgeErr = bridge.begin(usb, 2323, 16384);
-        if (bridgeErr != ESP_OK)
-        {
-            ESP_LOGE(TAG, "serial bridge not available: %s", esp_err_to_name(bridgeErr));
-        }
-        else
-        {
-            ESP_LOGI(TAG, "console: socket://%s.local:2323", wifi.hostname().c_str());
-
-            // Solange einer der beiden Server einen Client hat, bleibt der Funk
-            // wach; danach dost er wieder. Das kostet im Leerlauf rund 100 mA
-            // weniger und haelt den S3 merklich kuehler.
-            bridge.setActivityHook(&onClientActivity, &wifi);
-            rfc2217.setActivityHook(&onClientActivity, &wifi);
-
-            bridge.setRfc2217(&rfc2217);
-            const esp_err_t rfcErr = rfc2217.begin(usb, 4000);
-            if (rfcErr != ESP_OK)
-            {
-                ESP_LOGE(TAG, "RFC2217 not available: %s", esp_err_to_name(rfcErr));
-            }
-            else
-            {
-                ESP_LOGI(TAG, "control: rfc2217://%s.local:4000", wifi.hostname().c_str());
-            }
-        }
+        xTaskCreatePinnedToCore(&usbGateTask, "usb_gate", 3584, &g_ctx, 3, nullptr, 0);
     }
 
     // Erst jetzt starten: der Task liest bridge und rfc2217.

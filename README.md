@@ -36,6 +36,7 @@ private tool, for now with no affiliation to the OpenKNX group.
 | Firmware to a CH32V003 | `/api/ch32/flash`, over the rv003usb bootloader's own protocol — no minichlink on the PC |
 | Web UI outside the image | in a LittleFS partition, replaceable over WiFi with `/api/fs` |
 | Why the probe last started | `reset_reason` tells a brownout from a crash — a target with a high inrush can reset the probe |
+| Cell voltage | measured through a divider on the adapter board, reported as `battery` in `/api/status` |
 
 Architecture, hardware and interfaces in detail: **[docs/](docs/)**.
 
@@ -148,6 +149,42 @@ red one back, moving it to GPIO48 turns it off again. It is therefore not a powe
 and the RGB LED costs you the red one. If you would rather keep the red LED, point the
 status LED at a free pin with `POST /api/led?gpio=N` — the value is stored in NVS.
 
+## Battery
+
+On the adapter board a 1M/1M divider sits behind the battery switch and feeds GPIO5
+(ADC1). `/api/status` reports it, and the UI shows a "Zelle" row:
+
+```json
+"battery": { "available": true, "level": "normal", "settled": true,
+             "mv": 3910, "pin_mv": 1955, "percent": 67, "trim": 1000 }
+```
+
+| Field | Meaning |
+|---|---|
+| `level` | `absent`, `normal`, `low` (< 3.55 V), `critical` (< 3.30 V), or `unknown` while warming up |
+| `settled` | false for the first ~25 s after boot, see below |
+| `mv` / `pin_mv` | cell voltage and the raw voltage at the divider tap — if the two disagree by anything other than the factor of two, the divider is not what you think it is |
+| `percent` | a rough gauge, not a measurement: a generic Li-ion curve over 13 support points, linearly interpolated, with no load compensation — at 30-120 mA the cell sits well below 0.1 C, so the IR drop is small against the spread of the curve itself. It reads 0 % at 3.30 V, the same point as `critical`, because the module's LDO gives up somewhere between 3.0 and 3.5 V; capacity below that is not usable here |
+
+Two things worth knowing:
+
+- **`absent` is the normal case on USB.** The divider is behind the battery switch, so
+  with the switch off — or no cell at all — the tap sits at ground. That is not a fault.
+- **The first ~25 s after boot report `unknown`.** The tap carries 10 µF against a 500 kΩ
+  source impedance, so it charges with a 5 s time constant and reads low until it has
+  settled. Without that hold-off the probe would announce an empty cell at every start.
+
+If the reading disagrees with a multimeter, trim it once: measure at the cell and post
+the value.
+
+```bash
+curl -X POST "http://openknx-probe-xxxx.local/api/battery/calibrate?mv=3870"
+```
+
+The factor is stored in NVS and applied from then on. 1 % resistors alone allow 2 % on the
+divider ratio, and the ADC characteristic adds to that — around 100 mV at 3.8 V, enough to
+move the low-battery warning by half an hour. Corrections beyond 25 % are rejected.
+
 ## PlatformIO integration
 
 No extra hardware is needed on the PC side — a few lines in the target project's
@@ -188,11 +225,17 @@ separate ESP-IDF installation is not required.
 ## First-time setup
 
 1. Flash the firmware. The probe finds no credentials and opens an open WiFi network
-   `openknx-probe-<mac>`.
+   named after itself, e.g. `OpenKNX-Probe-A1B2`.
 2. Connect to it — the captive portal opens by itself, otherwise `http://192.168.4.1/`.
-3. Pick a network, enter the password, optionally assign your own device name (important
-   when several probes are in use).
+3. Pick a network and enter the password. The device name is not configurable: it is
+   always `OpenKNX-Probe-<last two MAC bytes>`, so it is unique per board and matches
+   the setup network you just joined.
 4. After the restart the probe is reachable at `http://<name>.local/`.
+
+The probe remembers **one** network. Entering another one replaces it. Also note that the
+fallback AP only ever opens during startup: once the probe has an address, a link that
+gets weak or drops is retried indefinitely and never falls back to the portal. To reach
+the portal on purpose, restart the probe while its network is out of reach.
 
 ## Self-update
 
