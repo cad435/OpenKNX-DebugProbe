@@ -113,10 +113,6 @@ and X033, but flashing them is not claimed — a different sector size would hav
 first. The scratchpad negotiation and the choice of boot routine already handle the larger
 bootloaders, so that part is done.
 
-**Out of scope** (see `docs/decisions/0005-nur-usb-bediente-ziele.md`): anything without its
-own USB interface. A bare CH32V003 without a bootloader, ARM over SWD, and any external
-debug adapter that would need its USB forwarded.
-
 ## Status LED
 
 The module's RGB LED (WS2812 on GPIO48) shows the operating state. Highest urgency wins —
