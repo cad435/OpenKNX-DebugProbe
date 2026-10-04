@@ -181,6 +181,27 @@ The factor is stored in NVS and applied from then on. 1 % resistors alone allow 
 divider ratio, and the ADC characteristic adds to that — around 100 mV at 3.8 V, enough to
 move the low-battery warning by half an hour. Corrections beyond 25 % are rejected.
 
+## Enclosure
+
+![The assembled probe in its printed enclosure: black lid, red body, black battery compartment, four socket-head screws in the corners](docs/case-assembled.jpg)
+
+A printable enclosure is included as a Fusion 360 archive:
+[`hardware/OpenKNXDebugProbe.f3z`](hardware/OpenKNXDebugProbe.f3z). It is made of three
+parts:
+
+| Part | Purpose |
+|---|---|
+| **Top** | lid with the openings for USB-C, the status LED and the electrolytic capacitor |
+| **Bottom** | the counterpart; the PCB is clamped between top and bottom |
+| **Battery compartment** | optional, goes underneath and holds the cell |
+
+Assembly needs **four M3×20 screws**. They go in from the top and thread straight into the
+plastic — no heat-set inserts, no captive nuts. The board is not screwed down itself; it is
+held by being clamped between the top and bottom parts.
+
+**Without a battery** you can leave the battery compartment off and counter the four screws
+with M3 nuts underneath instead.
+
 ## PlatformIO integration
 
 No extra hardware is needed on the PC side — a few lines in the target project's

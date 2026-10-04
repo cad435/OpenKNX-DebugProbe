@@ -1,6 +1,9 @@
 # Hardware
 
-Schematic as PDF: [OpenKNX-DebugProbe_V0.1-Schematic.PDF](OpenKNX-DebugProbe_V0.1-Schematic.PDF)
+Schematic as PDF: [OpenKNX-DebugProbe_V0.2-Schematic.PDF](OpenKNX-DebugProbe_V0.2-Schematic.PDF)
+
+Printable enclosure: [OpenKNXDebugProbe.f3z](OpenKNXDebugProbe.f3z) (Fusion 360 archive).
+Three parts, four M3×20 screws — see [Enclosure](../README.md#enclosure) in the main README.
 
 ## Probe module
 
